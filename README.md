@@ -22,7 +22,20 @@ Pengwin consists of two main parts:
 
 ---
 
-## 🛠️ Prerequisites
+## 📦 Installation (Pre-built Binary)
+
+No Rust required — just two steps:
+
+1. **Install [WinFsp](https://winfsp.dev/)** — download and run the installer (Core component is sufficient).
+2. **Download `pengwin.exe`** from the [latest release](../../releases/latest) and place it anywhere on your `PATH`.
+
+Then run as Administrator — see the usage examples below.
+
+> **Note:** Administrator rights are required to access physical disk partitions. Mounting image files works without elevation.
+
+---
+
+## 🛠️ Prerequisites (Building from Source)
 
 Before you start flying with Pengwin, make sure you have:
 
