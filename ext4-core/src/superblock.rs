@@ -49,7 +49,10 @@ pub mod incompat {
     pub const INLINE_DATA:      u32 = 0x8000;
     pub const ENCRYPT:          u32 = 0x10000;
 
-    pub const UNSUPPORTED_MASK: u32 = RECOVER | ENCRYPT;
+    // INLINE_DATA stores file data directly in the inode block field; we do not
+    // implement it, and silently treating such inodes as extent-based would
+    // corrupt reads. Reject any image that uses it.
+    pub const UNSUPPORTED_MASK: u32 = RECOVER | ENCRYPT | INLINE_DATA;
 }
 
 pub mod ro_compat {

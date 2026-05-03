@@ -5,7 +5,7 @@ use winfsp::Result;
 use winfsp::U16CStr;
 use windows::Win32::Foundation::{
     STATUS_ACCESS_DENIED, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_NOT_A_REPARSE_POINT,
-    STATUS_BUFFER_TOO_SMALL,
+    STATUS_BUFFER_TOO_SMALL, STATUS_NAME_TOO_LONG,
 };
 use winfsp_sys::FILE_ACCESS_RIGHTS;
 
@@ -30,7 +30,13 @@ const SYMLINK_FLAG_RELATIVE: u32 = 0x0000_0001;
 /// - u16 PrintNameLength
 /// - u32 Flags
 /// - [u8]  PathBuffer (SubstituteName immediately followed by PrintName, UTF-16LE, no NUL)
-pub fn encode_symlink_reparse_buffer(unix_target: &str) -> Vec<u8> {
+/// Maximum UTF-16 code units in a symlink target that can fit in a REPARSE_DATA_BUFFER.
+/// The buffer's ReparseDataLength field is u16; the max payload is 0xFFFF bytes.
+/// Payload = 12 (fixed symlink fields) + 2 * name_bytes.
+/// So name_bytes ≤ (0xFFFF - 12) / 2 = 32761 bytes = 16380 UTF-16 code units.
+const MAX_SYMLINK_UTF16_LEN: usize = 16380;
+
+pub fn encode_symlink_reparse_buffer(unix_target: &str) -> winfsp::Result<Vec<u8>> {
     // Convert to Windows path: replace '/' with '\\'.
     // Absolute Unix paths get a leading '\' which Windows treats as relative to the
     // current drive root — acceptable for a read-only cross-platform mount.
@@ -38,6 +44,10 @@ pub fn encode_symlink_reparse_buffer(unix_target: &str) -> Vec<u8> {
 
     // UTF-16LE encode, no null terminator.
     let target_utf16: Vec<u16> = win_target.encode_utf16().collect();
+    if target_utf16.len() > MAX_SYMLINK_UTF16_LEN {
+        return Err(STATUS_NAME_TOO_LONG.into());
+    }
+
     let target_bytes: Vec<u8> = target_utf16
         .iter()
         .flat_map(|c| c.to_le_bytes())
@@ -46,11 +56,13 @@ pub fn encode_symlink_reparse_buffer(unix_target: &str) -> Vec<u8> {
     // SubstituteName and PrintName are identical; they share the same bytes.
     // SubstituteName: offset 0, length = target_bytes.len()
     // PrintName:      offset = target_bytes.len(), length = target_bytes.len()
-    let name_len = target_bytes.len() as u16;
+    let name_len = target_bytes.len() as u16; // safe: target_bytes.len() ≤ 32761*2 = 65522
     let path_buffer_len = 2 * target_bytes.len(); // substitute + print
 
     // ReparseDataLength covers everything after the 8-byte common header.
     // That is: 4×u16 + u32 (Flags) + PathBuffer = 12 + path_buffer_len bytes.
+    // safe: 12 + 65522*2 = 131056+12 — wait, path_buffer_len = 2*target_bytes.len() = 4*utf16_len
+    // max path_buffer_len = 4 * 16380 = 65520; 12 + 65520 = 65532 ≤ 0xFFFF ✓
     let reparse_data_len = (12usize + path_buffer_len) as u16;
 
     let flags: u32 = if unix_target.starts_with('/') {
@@ -72,7 +84,7 @@ pub fn encode_symlink_reparse_buffer(unix_target: &str) -> Vec<u8> {
     buf.extend_from_slice(&flags.to_le_bytes());                  // Flags
     buf.extend_from_slice(&target_bytes);                         // SubstituteName (UTF-16LE)
     buf.extend_from_slice(&target_bytes);                         // PrintName      (UTF-16LE)
-    buf
+    Ok(buf)
 }
 
 impl<D: BlockDevice + 'static> Ext4Fs<D> {
@@ -137,7 +149,7 @@ impl<D: BlockDevice + 'static> Ext4Fs<D> {
             _ => return Err(STATUS_NOT_A_REPARSE_POINT.into()),
         };
 
-        let encoded = encode_symlink_reparse_buffer(target);
+        let encoded = encode_symlink_reparse_buffer(target)?;
         if buffer.len() < encoded.len() {
             return Err(STATUS_BUFFER_TOO_SMALL.into());
         }
@@ -167,7 +179,7 @@ impl<D: BlockDevice + 'static> Ext4Fs<D> {
         let target = self.read_symlink_target(&inode)
             .map_err(|_| STATUS_NOT_A_REPARSE_POINT)?;
 
-        let encoded = encode_symlink_reparse_buffer(&target);
+        let encoded = encode_symlink_reparse_buffer(&target)?;
         if buffer.len() < encoded.len() {
             return Err(STATUS_BUFFER_TOO_SMALL.into());
         }
@@ -216,7 +228,7 @@ mod tests {
 
     #[test]
     fn absolute_symlink_flag_zero() {
-        let buf = encode_symlink_reparse_buffer("/hello.txt");
+        let buf = encode_symlink_reparse_buffer("/hello.txt").unwrap();
         let (_tag, _dlen, _) = parse_reparse_header(&buf);
         let (_so, _sl, _po, _pl, flags) = parse_symlink_fields(&buf);
         assert_eq!(flags, 0, "absolute symlink must not set SYMLINK_FLAG_RELATIVE");
@@ -224,14 +236,14 @@ mod tests {
 
     #[test]
     fn relative_symlink_flag_set() {
-        let buf = encode_symlink_reparse_buffer("../sibling.txt");
+        let buf = encode_symlink_reparse_buffer("../sibling.txt").unwrap();
         let (_so, _sl, _po, _pl, flags) = parse_symlink_fields(&buf);
         assert_eq!(flags, 1, "relative symlink must set SYMLINK_FLAG_RELATIVE");
     }
 
     #[test]
     fn reparse_tag_correct() {
-        let buf = encode_symlink_reparse_buffer("/foo");
+        let buf = encode_symlink_reparse_buffer("/foo").unwrap();
         let (tag, _, _) = parse_reparse_header(&buf);
         assert_eq!(tag, 0xA000_000C);
     }
@@ -239,7 +251,7 @@ mod tests {
     #[test]
     fn substitute_name_round_trips() {
         let target = "/hello/world.txt";
-        let buf = encode_symlink_reparse_buffer(target);
+        let buf = encode_symlink_reparse_buffer(target).unwrap();
         let (sub_off, sub_len, _po, _pl, _flags) = parse_symlink_fields(&buf);
         let path_start = 20usize; // 8 header + 12 symlink fields
         let sub_bytes = &buf[path_start + sub_off as usize..path_start + sub_off as usize + sub_len as usize];
@@ -250,9 +262,17 @@ mod tests {
 
     #[test]
     fn buffer_size_consistent() {
-        let buf = encode_symlink_reparse_buffer("/a/b/c");
+        let buf = encode_symlink_reparse_buffer("/a/b/c").unwrap();
         let (_tag, dlen, _) = parse_reparse_header(&buf);
         // Total buf = 8 (common header) + dlen
         assert_eq!(buf.len(), 8 + dlen as usize);
+    }
+
+    #[test]
+    fn too_long_target_returns_error() {
+        // 16381 ASCII chars → 16381 UTF-16 code units > MAX_SYMLINK_UTF16_LEN (16380)
+        let long_target: String = "a".repeat(16381);
+        let result = encode_symlink_reparse_buffer(&long_target);
+        assert!(result.is_err(), "expected error for oversized symlink target");
     }
 }

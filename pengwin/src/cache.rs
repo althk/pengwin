@@ -11,9 +11,11 @@ pub struct CachedBlockDevice<D: BlockDevice> {
 
 impl<D: BlockDevice> CachedBlockDevice<D> {
     pub fn new(inner: D, cache_size: usize) -> Self {
+        let capacity = NonZeroUsize::new(cache_size)
+            .unwrap_or(NonZeroUsize::new(1).expect("1 is non-zero"));
         Self {
             inner,
-            cache: Mutex::new(LruCache::new(NonZeroUsize::new(cache_size).unwrap())),
+            cache: Mutex::new(LruCache::new(capacity)),
         }
     }
 }

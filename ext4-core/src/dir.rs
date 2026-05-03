@@ -62,6 +62,11 @@ fn parse_dirent(buf: &[u8], offset: usize) -> Result<Option<(DirEntry, usize)>, 
         return Err(DirError::InvalidRecLen(rec_len));
     }
 
+    // name_len must fit within the record (8-byte header + name bytes).
+    if name_len > rec.saturating_sub(8) {
+        return Err(DirError::InvalidRecLen(rec_len));
+    }
+
     if inode_num == 0 {
         return Ok(Some((
             DirEntry { inode_num: 0, name: String::new(), file_type },
@@ -69,8 +74,7 @@ fn parse_dirent(buf: &[u8], offset: usize) -> Result<Option<(DirEntry, usize)>, 
         )));
     }
 
-    let name_end = 8 + name_len.min(rec.saturating_sub(8));
-    let name = String::from_utf8_lossy(&remaining[8..name_end]).into_owned();
+    let name = String::from_utf8_lossy(&remaining[8..8 + name_len]).into_owned();
 
     Ok(Some((DirEntry { inode_num, name, file_type }, rec)))
 }
