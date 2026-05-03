@@ -1,0 +1,25 @@
+[package]
+name = "pengwin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ext4-core = { path = "../ext4-core" }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+winfsp = { version = "0.12", features = ["full", "windows-61"] }
+winfsp-sys = "0.12"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
+thiserror = "1"
+ctrlc = "3"
+lru = "0.12"
+parking_lot = "0.12"
+
+[dev-dependencies]
+serial_test = "3"
