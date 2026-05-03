@@ -6,6 +6,10 @@ use crate::inode::Inode;
 
 pub const EXTENT_MAGIC: u16 = 0xF30A;
 const MAX_DEPTH: u16 = 5;
+/// Maximum leaf entries we will accumulate across the whole tree.
+/// An ext4 extent tree can have at most 2^32 blocks; each extent covers at least 1 block,
+/// so 2^21 extents is a practical ceiling (matches the group-count cap elsewhere).
+const MAX_TOTAL_LEAVES: usize = 1 << 21;
 
 /// Extent tree header — appears at the start of each node (root or internal).
 #[derive(Debug, Clone, FromBytes, FromZeroes, AsBytes)]
@@ -58,6 +62,9 @@ pub enum ExtentError {
 
     #[error("block number overflows sector address space")]
     BlockNumberOverflow,
+
+    #[error("extent tree has too many leaves (filesystem is corrupt or too large)")]
+    TooManyLeaves,
 
     #[error("block device error: {0}")]
     BlockDevice(#[from] crate::block_device::BlockDeviceError),
@@ -204,6 +211,19 @@ impl<'a> ExtentIter<'a> {
     }
 }
 
+/// Public entry point used by `FileReader` to pre-collect all extent leaves for an inode.
+pub fn collect_leaves_pub(
+    dev: &dyn BlockDevice,
+    sb: &Superblock,
+    inode: &Inode,
+    out: &mut Vec<ExtentLeaf>,
+) -> Result<(), ExtentError> {
+    if !inode.uses_extents() {
+        return Err(ExtentError::UnsupportedBlockMap);
+    }
+    collect_leaves(dev, sb, &inode.block_data, out)
+}
+
 fn collect_leaves(
     dev: &dyn BlockDevice,
     sb: &Superblock,
@@ -231,6 +251,9 @@ fn collect_leaves(
     }
 
     if depth == 0 {
+        if out.len().saturating_add(entries) > MAX_TOTAL_LEAVES {
+            return Err(ExtentError::TooManyLeaves);
+        }
         for i in 0..entries {
             let off = 12 + i * 12;
             let leaf = ExtentLeaf::read_from(&node_data[off..off + 12])

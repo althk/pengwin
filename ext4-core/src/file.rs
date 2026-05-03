@@ -2,7 +2,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use crate::block_device::{BlockDevice, read_sectors};
 use crate::superblock::Superblock;
 use crate::inode::Inode;
-use crate::extent::lookup_block;
+use crate::extent::{ExtentLeaf, collect_leaves_pub};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FileError {
@@ -24,6 +24,8 @@ pub struct FileReader<'a> {
     sb:       &'a Superblock,
     inode:    &'a Inode,
     position: u64,
+    /// Sorted extent leaf cache — built once at construction, used for O(log n) block lookups.
+    leaves:   Vec<ExtentLeaf>,
 }
 
 impl<'a> std::fmt::Debug for FileReader<'a> {
@@ -37,10 +39,37 @@ impl<'a> FileReader<'a> {
         if !inode.is_file() && !inode.is_symlink() {
             return Err(FileError::NotAFile);
         }
-        Ok(Self { dev, sb, inode, position: 0 })
+        let mut leaves = Vec::new();
+        collect_leaves_pub(dev, sb, inode, &mut leaves)?;
+        leaves.sort_by_key(|l| l.ee_block.get());
+        Ok(Self { dev, sb, inode, position: 0, leaves })
     }
 
     pub fn size(&self) -> u64 { self.inode.size }
+
+    /// Resolve a logical block number to a physical block, using the cached leaf list.
+    fn resolve_lblock(&self, lblock: u64) -> Option<u64> {
+        // Binary search for the last leaf whose ee_block <= lblock.
+        let idx = self.leaves.partition_point(|l| l.ee_block.get() as u64 <= lblock);
+        if idx == 0 {
+            return None;
+        }
+        let leaf = &self.leaves[idx - 1];
+        let first = leaf.ee_block.get() as u64;
+        let len_raw = leaf.ee_len.get();
+        // ee_len > 32768 means uninitialized extent — treat as hole.
+        if len_raw > 32768 {
+            return None;
+        }
+        let count = len_raw as u64;
+        if lblock < first + count {
+            let phys_start = (leaf.ee_start_hi.get() as u64) << 32
+                | leaf.ee_start_lo.get() as u64;
+            Some(phys_start + (lblock - first))
+        } else {
+            None
+        }
+    }
 }
 
 impl<'a> Read for FileReader<'a> {
@@ -60,12 +89,9 @@ impl<'a> Read for FileReader<'a> {
             let block_off = (file_off % block_size) as usize;
             let can_take = ((block_size as usize) - block_off).min(to_read - written);
 
-            let phys = lookup_block(self.dev, self.sb, self.inode, lblock)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-            match phys {
+            match self.resolve_lblock(lblock) {
                 None => {
-                    // Sparse hole — fill with zeros.
+                    // Sparse hole or uninitialized extent — fill with zeros.
                     buf[written..written + can_take].fill(0);
                 }
                 Some(block_num) => {

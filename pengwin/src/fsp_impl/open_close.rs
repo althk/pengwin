@@ -42,27 +42,24 @@ pub fn encode_symlink_reparse_buffer(unix_target: &str) -> winfsp::Result<Vec<u8
     // current drive root — acceptable for a read-only cross-platform mount.
     let win_target: String = unix_target.replace('/', "\\");
 
-    // UTF-16LE encode, no null terminator.
-    let target_utf16: Vec<u16> = win_target.encode_utf16().collect();
-    if target_utf16.len() > MAX_SYMLINK_UTF16_LEN {
-        return Err(STATUS_NAME_TOO_LONG.into());
+    // UTF-16LE encode directly into bytes — no intermediate Vec<u16>.
+    let mut target_bytes: Vec<u8> = Vec::with_capacity(win_target.len() * 2);
+    let mut utf16_len = 0usize;
+    for code_unit in win_target.encode_utf16() {
+        utf16_len += 1;
+        if utf16_len > MAX_SYMLINK_UTF16_LEN {
+            return Err(STATUS_NAME_TOO_LONG.into());
+        }
+        target_bytes.extend_from_slice(&code_unit.to_le_bytes());
     }
-
-    let target_bytes: Vec<u8> = target_utf16
-        .iter()
-        .flat_map(|c| c.to_le_bytes())
-        .collect();
 
     // SubstituteName and PrintName are identical; they share the same bytes.
     // SubstituteName: offset 0, length = target_bytes.len()
     // PrintName:      offset = target_bytes.len(), length = target_bytes.len()
-    let name_len = target_bytes.len() as u16; // safe: target_bytes.len() ≤ 32761*2 = 65522
-    let path_buffer_len = 2 * target_bytes.len(); // substitute + print
-
-    // ReparseDataLength covers everything after the 8-byte common header.
-    // That is: 4×u16 + u32 (Flags) + PathBuffer = 12 + path_buffer_len bytes.
-    // safe: 12 + 65522*2 = 131056+12 — wait, path_buffer_len = 2*target_bytes.len() = 4*utf16_len
-    // max path_buffer_len = 4 * 16380 = 65520; 12 + 65520 = 65532 ≤ 0xFFFF ✓
+    // safe: utf16_len ≤ 16380 → target_bytes.len() ≤ 32760 → fits in u16
+    let name_len = target_bytes.len() as u16;
+    // SubstituteName + PrintName = 2 copies; max = 4 * 16380 = 65520; 12 + 65520 ≤ 0xFFFF ✓
+    let path_buffer_len = 2 * target_bytes.len();
     let reparse_data_len = (12usize + path_buffer_len) as u16;
 
     let flags: u32 = if unix_target.starts_with('/') {

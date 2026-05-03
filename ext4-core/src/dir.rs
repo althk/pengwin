@@ -135,15 +135,38 @@ pub fn read_dir(
 }
 
 /// Find a directory entry by name. Returns inode number.
+/// Stops scanning as soon as the name is found; does not allocate the full entry list.
 pub fn lookup(
     dev: &dyn BlockDevice,
     sb: &Superblock,
-    gdt: &GroupDescTable,
+    _gdt: &GroupDescTable,
     dir_inode: &Inode,
     name: &str,
 ) -> Result<Option<u32>, DirError> {
-    let entries = read_dir(dev, sb, gdt, dir_inode)?;
-    Ok(entries.into_iter().find(|e| e.name == name).map(|e| e.inode_num))
+    if !dir_inode.is_dir() {
+        return Err(DirError::NotADirectory);
+    }
+
+    let block_count = dir_inode.size.div_ceil(sb.block_size as u64);
+    for lblock in 0..block_count {
+        let phys = lookup_block(dev, sb, dir_inode, lblock)?;
+        if let Some(block_num) = phys {
+            let block_data = read_block(dev, sb, block_num)?;
+            let mut pos = 0usize;
+            while pos < block_data.len() {
+                match parse_dirent(&block_data, pos)? {
+                    None => break,
+                    Some((entry, consumed)) => {
+                        if entry.inode_num != 0 && entry.name == name {
+                            return Ok(Some(entry.inode_num));
+                        }
+                        pos += consumed;
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
