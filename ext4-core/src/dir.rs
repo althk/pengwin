@@ -22,6 +22,10 @@ pub struct DirEntry {
     pub file_type: u8,
 }
 
+/// Maximum number of blocks we will scan in a single directory inode.
+/// ext4 directories are rarely more than a few blocks; 65536 × 4096 = 256 MiB is a safe cap.
+const MAX_DIR_BLOCKS: u64 = 65536;
+
 #[derive(Debug, thiserror::Error)]
 pub enum DirError {
     #[error("inode is not a directory")]
@@ -29,6 +33,9 @@ pub enum DirError {
 
     #[error("directory entry record length is invalid: {0}")]
     InvalidRecLen(u16),
+
+    #[error("directory inode size is too large (possible corruption)")]
+    SizeTooLarge,
 
     #[error("block number overflows sector address space")]
     BlockNumberOverflow,
@@ -120,6 +127,9 @@ pub fn read_dir(
     }
 
     let block_count = dir_inode.size.div_ceil(sb.block_size as u64);
+    if block_count > MAX_DIR_BLOCKS {
+        return Err(DirError::SizeTooLarge);
+    }
     let mut entries = Vec::new();
 
     for lblock in 0..block_count {
@@ -148,6 +158,9 @@ pub fn lookup(
     }
 
     let block_count = dir_inode.size.div_ceil(sb.block_size as u64);
+    if block_count > MAX_DIR_BLOCKS {
+        return Err(DirError::SizeTooLarge);
+    }
     for lblock in 0..block_count {
         let phys = lookup_block(dev, sb, dir_inode, lblock)?;
         if let Some(block_num) = phys {

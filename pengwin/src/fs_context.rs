@@ -80,9 +80,31 @@ impl<D: BlockDevice + 'static> Ext4Fs<D> {
 
     /// Resolve an absolute path like "/subdir/file.txt" to an inode number.
     /// Path separator is always '/' (WinFsp normalizes backslashes).
+    ///
+    /// `..` components are rejected — WinFsp normalises paths before calling us, so a
+    /// well-formed request will never contain them. Accepting `..` would allow a crafted
+    /// path to escape the filesystem root on a future write path.
+    ///
+    /// Symlink hops are limited to MAX_SYMLINK_HOPS to prevent infinite loops.
     pub fn resolve_path(&self, path: &str) -> Result<u32, Ext4FsError> {
+        self.resolve_path_with_hops(path, 0)
+    }
+
+    fn resolve_path_with_hops(&self, path: &str, hops: u32) -> Result<u32, Ext4FsError> {
+        if hops > MAX_SYMLINK_HOPS {
+            return Err(Ext4FsError::SymlinkLoop);
+        }
+
         let mut current = 2u32; // root inode
         for component in path.split('/').filter(|s| !s.is_empty()) {
+            if component == ".." {
+                return Err(Ext4FsError::DotDotNotAllowed);
+            }
+            // "." is a no-op — stay on the current inode.
+            if component == "." {
+                continue;
+            }
+
             let inode = self.inode(current)?;
             if !inode.is_dir() {
                 return Err(Ext4FsError::NotADirectory(component.to_string()));
@@ -95,6 +117,9 @@ impl<D: BlockDevice + 'static> Ext4Fs<D> {
         Ok(current)
     }
 }
+
+/// Maximum number of symlink hops allowed during path resolution.
+const MAX_SYMLINK_HOPS: u32 = 40;
 
 /// Per-handle context for an open file or directory.
 pub enum FileHandle {
@@ -137,4 +162,10 @@ pub enum Ext4FsError {
 
     #[error("not a directory: {0}")]
     NotADirectory(String),
+
+    #[error("'..' components are not permitted in paths")]
+    DotDotNotAllowed,
+
+    #[error("symlink loop detected (too many hops)")]
+    SymlinkLoop,
 }
