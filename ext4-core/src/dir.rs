@@ -30,6 +30,9 @@ pub enum DirError {
     #[error("directory entry record length is invalid: {0}")]
     InvalidRecLen(u16),
 
+    #[error("block number overflows sector address space")]
+    BlockNumberOverflow,
+
     #[error("extent error: {0}")]
     Extent(#[from] ExtentError),
 
@@ -92,7 +95,9 @@ fn parse_block_entries(block: &[u8], out: &mut Vec<DirEntry>) -> Result<(), DirE
 fn read_block(dev: &dyn BlockDevice, sb: &Superblock, block: u64) -> Result<Vec<u8>, DirError> {
     use crate::block_device::read_sectors;
     let sectors_per_block = sb.block_size as u64 / 512;
-    let start_sector = block * sectors_per_block;
+    let start_sector = block
+        .checked_mul(sectors_per_block)
+        .ok_or(DirError::BlockNumberOverflow)?;
     let data = read_sectors(dev, start_sector, sectors_per_block)?;
     Ok(data)
 }

@@ -124,7 +124,11 @@ pub fn read_inode(
     let sectors_needed = (offset_in_first_sector as u64 + inode_size).div_ceil(512);
 
     let raw_bytes = read_sectors(dev, start_sector, sectors_needed)?;
-    let inode_slice = &raw_bytes[offset_in_first_sector..offset_in_first_sector + 128];
+    let end = offset_in_first_sector
+        .checked_add(128)
+        .filter(|&e| e <= raw_bytes.len())
+        .ok_or(InodeError::InvalidBuffer)?;
+    let inode_slice = &raw_bytes[offset_in_first_sector..end];
 
     let raw = RawInode::read_from(inode_slice).ok_or(InodeError::InvalidBuffer)?;
 

@@ -89,8 +89,15 @@ pub enum GroupDescError {
 
     #[error("group descriptor buffer has wrong size")]
     InvalidBuffer,
+
+    #[error("group count {0} exceeds maximum (filesystem is corrupt or too large)")]
+    TooManyGroups(u64),
+
+    #[error("group descriptor table size overflows address space")]
+    TableSizeOverflow,
 }
 
+#[derive(Debug)]
 pub struct GroupDescTable {
     groups: Vec<GroupDesc>,
 }
@@ -98,14 +105,19 @@ pub struct GroupDescTable {
 impl GroupDescTable {
     /// Load all group descriptors from the device using the parsed superblock.
     pub fn load(dev: &dyn BlockDevice, sb: &Superblock) -> Result<Self, GroupDescError> {
-        let group_count = groups_count(sb);
+        // blocks_per_group == 0 is validated in superblock::parse, but guard here too.
+        let group_count_u64 = groups_count(sb)?;
+        let group_count = usize::try_from(group_count_u64)
+            .map_err(|_| GroupDescError::TooManyGroups(group_count_u64))?;
 
         // GDT starts at the block immediately after the superblock block.
         // s_first_data_block is 0 for 4K blocks, 1 for 1K blocks.
         let gdt_block = sb.first_data_block as u64 + 1;
 
         let desc_size = sb.desc_size as u64;
-        let total_bytes = group_count as u64 * desc_size;
+        let total_bytes = group_count_u64
+            .checked_mul(desc_size)
+            .ok_or(GroupDescError::TableSizeOverflow)?;
 
         // Convert block address to sector address.
         let sectors_per_block = sb.block_size as u64 / 512;
@@ -116,11 +128,17 @@ impl GroupDescTable {
 
         let mut groups = Vec::with_capacity(group_count);
         for i in 0..group_count {
-            let off = i * sb.desc_size as usize;
+            let off = i
+                .checked_mul(sb.desc_size as usize)
+                .ok_or(GroupDescError::TableSizeOverflow)?;
             // Always parse as 64-byte RawGroupDesc; bytes beyond desc_size remain zero.
             let mut buf = [0u8; 64];
             let len = (sb.desc_size as usize).min(64);
-            buf[..len].copy_from_slice(&raw_bytes[off..off + len]);
+            let src_end = off.checked_add(len).ok_or(GroupDescError::TableSizeOverflow)?;
+            if src_end > raw_bytes.len() {
+                return Err(GroupDescError::InvalidBuffer);
+            }
+            buf[..len].copy_from_slice(&raw_bytes[off..src_end]);
             let raw = RawGroupDesc::read_from(buf.as_slice())
                 .ok_or(GroupDescError::InvalidBuffer)?;
             groups.push(GroupDesc::from_raw(&raw, sb.desc_size));
@@ -153,8 +171,17 @@ impl GroupDescTable {
     }
 }
 
-fn groups_count(sb: &Superblock) -> usize {
-    sb.blocks_count.div_ceil(sb.blocks_per_group as u64) as usize
+fn groups_count(sb: &Superblock) -> Result<u64, GroupDescError> {
+    // blocks_per_group == 0 is validated in superblock::parse; guard defensively here.
+    if sb.blocks_per_group == 0 {
+        return Err(GroupDescError::TooManyGroups(0));
+    }
+    let count = sb.blocks_count.div_ceil(sb.blocks_per_group as u64);
+    // Ext4 supports at most 2^32 block groups; cap at a safe practical limit.
+    if count > (1 << 21) {
+        return Err(GroupDescError::TooManyGroups(count));
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -273,6 +300,28 @@ mod tests {
         let gdt = GroupDescTable::load(&dev, &sb).unwrap();
         let err = gdt.group_for_inode(0, &sb).unwrap_err();
         assert!(matches!(err, GroupDescError::InvalidInode(0)));
+    }
+
+    #[test]
+    fn zero_blocks_per_group_returns_error() {
+        // blocks_per_group == 0 must not panic; groups_count returns an error.
+        let sb = Superblock {
+            block_size:        4096,
+            blocks_count:      1024,
+            inodes_count:      256,
+            inodes_per_group:  256,
+            blocks_per_group:  0, // invalid
+            first_data_block:  0,
+            uuid:              [0u8; 16],
+            volume_name:       String::new(),
+            desc_size:         64,
+            feature_incompat:  0,
+            feature_ro_compat: 0,
+            inode_size:        256,
+        };
+        let dev = MemDevice(vec![0u8; 8192]);
+        let err = GroupDescTable::load(&dev, &sb).unwrap_err();
+        assert!(matches!(err, GroupDescError::TooManyGroups(_)));
     }
 
     #[test]

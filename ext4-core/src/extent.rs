@@ -56,6 +56,9 @@ pub enum ExtentError {
     #[error("extent node buffer too small for declared entry count")]
     TruncatedNode,
 
+    #[error("block number overflows sector address space")]
+    BlockNumberOverflow,
+
     #[error("block device error: {0}")]
     BlockDevice(#[from] crate::block_device::BlockDeviceError),
 }
@@ -154,7 +157,9 @@ fn lookup_in_node(
 
 fn read_block(dev: &dyn BlockDevice, sb: &Superblock, block: u64) -> Result<Vec<u8>, ExtentError> {
     let sectors_per_block = sb.block_size as u64 / 512;
-    let start_sector = block * sectors_per_block;
+    let start_sector = block
+        .checked_mul(sectors_per_block)
+        .ok_or(ExtentError::BlockNumberOverflow)?;
     let data = read_sectors(dev, start_sector, sectors_per_block)?;
     Ok(data)
 }

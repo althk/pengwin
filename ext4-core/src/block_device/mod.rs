@@ -36,7 +36,11 @@ pub fn read_sectors(
     start: u64,
     count: u64,
 ) -> Result<Vec<u8>, BlockDeviceError> {
-    let mut out = vec![0u8; (count * 512) as usize];
+    let total_bytes = count
+        .checked_mul(512)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or(BlockDeviceError::InvalidGeometry(count))?;
+    let mut out = vec![0u8; total_bytes];
     for i in 0..count {
         let offset = i as usize * 512;
         let buf: &mut [u8; 512] = (&mut out[offset..offset + 512])
@@ -92,6 +96,14 @@ mod tests {
         let mut buf = [0u8; 512];
         let err = dev.read_sector(2, &mut buf).unwrap_err();
         assert!(matches!(err, BlockDeviceError::OutOfRange(2, 2)));
+    }
+
+    #[test]
+    fn read_sectors_count_overflow() {
+        let dev = make_device(4);
+        // u64::MAX * 512 overflows → InvalidGeometry
+        let err = read_sectors(&dev, 0, u64::MAX).unwrap_err();
+        assert!(matches!(err, BlockDeviceError::InvalidGeometry(_)));
     }
 
     #[test]

@@ -91,6 +91,15 @@ pub enum SuperblockError {
 
     #[error("superblock buffer has wrong size")]
     InvalidBuffer,
+
+    #[error("s_log_block_size {0} is out of range (max 6, i.e. 64 KiB blocks)")]
+    InvalidBlockSize(u32),
+
+    #[error("inode size {0} is invalid (must be 128–1024 and a power of two)")]
+    InvalidInodeSize(u16),
+
+    #[error("filesystem geometry is invalid (inodes_per_group or blocks_per_group is zero)")]
+    InvalidGeometry,
 }
 
 /// Read and validate the ext4 superblock from `dev`.
@@ -113,7 +122,11 @@ pub fn parse(dev: &dyn BlockDevice) -> Result<Superblock, SuperblockError> {
         return Err(SuperblockError::UnsupportedFeatures(unsupported));
     }
 
-    let block_size = 1024u32 << raw.s_log_block_size.get();
+    let log_block_size = raw.s_log_block_size.get();
+    if log_block_size > 6 {
+        return Err(SuperblockError::InvalidBlockSize(log_block_size));
+    }
+    let block_size = 1024u32 << log_block_size;
     let blocks_lo = raw.s_blocks_count_lo.get() as u64;
     let blocks_hi = raw.s_blocks_count_hi.get() as u64;
     let blocks_count = (blocks_hi << 32) | blocks_lo;
@@ -132,16 +145,29 @@ pub fn parse(dev: &dyn BlockDevice) -> Result<Superblock, SuperblockError> {
         0 => 128,
         _ => {
             let s = raw.s_inode_size.get();
-            if s < 128 { 128 } else { s }
+            if s < 128 {
+                128
+            } else {
+                if s > 1024 || !s.is_power_of_two() {
+                    return Err(SuperblockError::InvalidInodeSize(s));
+                }
+                s
+            }
         }
     };
+
+    let inodes_per_group = raw.s_inodes_per_group.get();
+    let blocks_per_group = raw.s_blocks_per_group.get();
+    if inodes_per_group == 0 || blocks_per_group == 0 {
+        return Err(SuperblockError::InvalidGeometry);
+    }
 
     Ok(Superblock {
         block_size,
         blocks_count,
         inodes_count:     raw.s_inodes_count.get(),
-        inodes_per_group: raw.s_inodes_per_group.get(),
-        blocks_per_group: raw.s_blocks_per_group.get(),
+        inodes_per_group,
+        blocks_per_group,
         first_data_block: raw.s_first_data_block.get(),
         uuid:             raw.s_uuid,
         volume_name,
@@ -234,6 +260,53 @@ mod tests {
         let dev = make_device(&sb);
         let parsed = parse(&dev).unwrap();
         assert_eq!(parsed.volume_name, "myfs");
+    }
+
+    #[test]
+    fn invalid_log_block_size() {
+        let mut sb = valid_sb();
+        sb.s_log_block_size = U32::new(7); // > 6 → invalid
+        let dev = make_device(&sb);
+        let err = parse(&dev).unwrap_err();
+        assert!(matches!(err, SuperblockError::InvalidBlockSize(7)));
+    }
+
+    #[test]
+    fn invalid_inode_size_too_large() {
+        let mut sb = valid_sb();
+        sb.s_rev_level = U32::new(1);
+        sb.s_inode_size = U16::new(2048); // > 1024 → invalid
+        let dev = make_device(&sb);
+        let err = parse(&dev).unwrap_err();
+        assert!(matches!(err, SuperblockError::InvalidInodeSize(2048)));
+    }
+
+    #[test]
+    fn invalid_inode_size_not_power_of_two() {
+        let mut sb = valid_sb();
+        sb.s_rev_level = U32::new(1);
+        sb.s_inode_size = U16::new(300); // not a power of two → invalid
+        let dev = make_device(&sb);
+        let err = parse(&dev).unwrap_err();
+        assert!(matches!(err, SuperblockError::InvalidInodeSize(300)));
+    }
+
+    #[test]
+    fn invalid_geometry_zero_inodes_per_group() {
+        let mut sb = valid_sb();
+        sb.s_inodes_per_group = U32::new(0);
+        let dev = make_device(&sb);
+        let err = parse(&dev).unwrap_err();
+        assert!(matches!(err, SuperblockError::InvalidGeometry));
+    }
+
+    #[test]
+    fn invalid_geometry_zero_blocks_per_group() {
+        let mut sb = valid_sb();
+        sb.s_blocks_per_group = U32::new(0);
+        let dev = make_device(&sb);
+        let err = parse(&dev).unwrap_err();
+        assert!(matches!(err, SuperblockError::InvalidGeometry));
     }
 
     #[test]

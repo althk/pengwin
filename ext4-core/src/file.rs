@@ -70,7 +70,9 @@ impl<'a> Read for FileReader<'a> {
                 }
                 Some(block_num) => {
                     let sectors_per_block = block_size / 512;
-                    let start_sector = block_num * sectors_per_block;
+                    let start_sector = block_num
+                        .checked_mul(sectors_per_block)
+                        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "block number overflow"))?;
                     let block_data = read_sectors(self.dev, start_sector, sectors_per_block)
                         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                     buf[written..written + can_take]
@@ -88,12 +90,26 @@ impl<'a> Read for FileReader<'a> {
 
 impl<'a> Seek for FileReader<'a> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let new_pos = match pos {
-            SeekFrom::Start(n)   => n,
-            SeekFrom::End(n)     => (self.inode.size as i64 + n) as u64,
-            SeekFrom::Current(n) => (self.position as i64 + n) as u64,
+        let new_pos: i64 = match pos {
+            SeekFrom::Start(n) => {
+                i64::try_from(n)
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "seek offset too large"))?
+            }
+            SeekFrom::End(n) => {
+                (self.inode.size as i64)
+                    .checked_add(n)
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "seek offset out of range"))?
+            }
+            SeekFrom::Current(n) => {
+                (self.position as i64)
+                    .checked_add(n)
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "seek offset out of range"))?
+            }
         };
-        self.position = new_pos.min(self.inode.size);
+        if new_pos < 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "seek before start of file"));
+        }
+        self.position = (new_pos as u64).min(self.inode.size);
         Ok(self.position)
     }
 }
@@ -321,6 +337,20 @@ mod tests {
         let mut byte = [0u8; 1];
         reader.read_exact(&mut byte).unwrap();
         assert_eq!(byte[0], b'f');
+    }
+
+    #[test]
+    fn seek_before_start_is_error() {
+        let content = b"abcdef";
+        let mut block_content = vec![0u8; BLOCK_SIZE];
+        block_content[..content.len()].copy_from_slice(content);
+        let block_data = make_extent_root_leaves(&[(0, 1, 2)]);
+        let inode = make_file_inode(block_data, content.len() as u64);
+        let dev = make_device_with_blocks(&[(2, block_content)]);
+        let sb = make_sb();
+        let mut reader = FileReader::new(&dev, &sb, &inode).unwrap();
+        let err = reader.seek(SeekFrom::End(-1000)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
