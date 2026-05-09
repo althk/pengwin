@@ -206,6 +206,10 @@ mod tests {
             Ok(())
         }
         fn sector_count(&self) -> u64 { self.0.len() as u64 / 512 }
+        fn write_sector(&self, _: u64, _: &[u8; 512]) -> Result<(), BlockDeviceError> {
+            Err(BlockDeviceError::NotSupported("read-only test device"))
+        }
+        fn flush(&self) -> Result<(), BlockDeviceError> { Ok(()) }
     }
 
     const BLOCK_SIZE: usize = 4096;
@@ -224,6 +228,7 @@ mod tests {
             feature_incompat:  0,
             feature_ro_compat: 0,
             inode_size:        256,
+            state:             0x0001,
         }
     }
 

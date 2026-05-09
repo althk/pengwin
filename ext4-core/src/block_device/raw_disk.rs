@@ -12,6 +12,7 @@ mod windows_impl {
         OPEN_EXISTING,
     };
     use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
     use windows_sys::Win32::System::IO::DeviceIoControl;
     use windows_sys::Win32::System::Ioctl::{
         DISK_GEOMETRY_EX, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
@@ -83,13 +84,34 @@ mod windows_impl {
             if sector_index >= self.sector_count {
                 return Err(BlockDeviceError::OutOfRange(sector_index, self.sector_count));
             }
-            let offset = sector_index * 512;
+            let offset = sector_index
+                .checked_mul(512)
+                .ok_or(BlockDeviceError::OutOfRange(sector_index, self.sector_count))?;
             self.file.seek_read(buf, offset)?;
             Ok(())
         }
 
         fn sector_count(&self) -> u64 {
             self.sector_count
+        }
+
+        fn write_sector(&self, sector_index: u64, buf: &[u8; 512]) -> Result<(), BlockDeviceError> {
+            if sector_index >= self.sector_count {
+                return Err(BlockDeviceError::OutOfRange(sector_index, self.sector_count));
+            }
+            let offset = sector_index
+                .checked_mul(512)
+                .ok_or(BlockDeviceError::OutOfRange(sector_index, self.sector_count))?;
+            self.file.seek_write(buf, offset)?;
+            Ok(())
+        }
+
+        fn flush(&self) -> Result<(), BlockDeviceError> {
+            use std::os::windows::io::AsRawHandle;
+            if unsafe { FlushFileBuffers(self.file.as_raw_handle() as _) } == 0 {
+                return Err(BlockDeviceError::Io(std::io::Error::last_os_error()));
+            }
+            Ok(())
         }
     }
 }
@@ -111,28 +133,42 @@ impl RawDiskDevice {
 mod tests {
     use crate::block_device::{BlockDevice, BlockDeviceError};
 
-    struct MemoryDevice(Vec<u8>);
+    struct MemoryDevice(std::sync::Mutex<Vec<u8>>);
 
     impl BlockDevice for MemoryDevice {
         fn read_sector(&self, sector_index: u64, buf: &mut [u8; 512]) -> Result<(), BlockDeviceError> {
-            let total = self.sector_count();
+            let data = self.0.lock().unwrap();
+            let total = data.len() as u64 / 512;
             if sector_index >= total {
                 return Err(BlockDeviceError::OutOfRange(sector_index, total));
             }
             let offset = sector_index as usize * 512;
-            buf.copy_from_slice(&self.0[offset..offset + 512]);
+            buf.copy_from_slice(&data[offset..offset + 512]);
             Ok(())
         }
 
         fn sector_count(&self) -> u64 {
-            self.0.len() as u64 / 512
+            self.0.lock().unwrap().len() as u64 / 512
         }
+
+        fn write_sector(&self, sector_index: u64, buf: &[u8; 512]) -> Result<(), BlockDeviceError> {
+            let mut data = self.0.lock().unwrap();
+            let total = data.len() as u64 / 512;
+            if sector_index >= total {
+                return Err(BlockDeviceError::OutOfRange(sector_index, total));
+            }
+            let offset = sector_index as usize * 512;
+            data[offset..offset + 512].copy_from_slice(buf);
+            Ok(())
+        }
+
+        fn flush(&self) -> Result<(), BlockDeviceError> { Ok(()) }
     }
 
     #[test]
     fn memory_device_bounds_check() {
         let data = vec![0xABu8; 1024]; // 2 sectors
-        let dev = MemoryDevice(data);
+        let dev = MemoryDevice(std::sync::Mutex::new(data));
         let mut buf = [0u8; 512];
         dev.read_sector(0, &mut buf).unwrap();
         assert_eq!(buf[0], 0xAB);

@@ -131,7 +131,10 @@ fn lookup_in_node(
             if lblock >= first && lblock < first + count {
                 let phys_start = (leaf.ee_start_hi.get() as u64) << 32
                     | leaf.ee_start_lo.get() as u64;
-                return Ok(Some(phys_start + (lblock - first)));
+                let phys = phys_start
+                    .checked_add(lblock - first)
+                    .ok_or(ExtentError::BlockNumberOverflow)?;
+                return Ok(Some(phys));
             }
         }
         return Ok(None);
@@ -311,7 +314,10 @@ impl<'a> Iterator for ExtentIter<'a> {
                 } else {
                     let phys_start = (leaf.ee_start_hi.get() as u64) << 32
                         | leaf.ee_start_lo.get() as u64;
-                    Some(phys_start + (lblock - first))
+                    match phys_start.checked_add(lblock - first) {
+                        Some(p) => Some(p),
+                        None => return Some(Err(ExtentError::BlockNumberOverflow)),
+                    }
                 };
                 return Some(Ok((lblock, phys)));
             }
@@ -343,6 +349,10 @@ mod tests {
             Ok(())
         }
         fn sector_count(&self) -> u64 { self.0.len() as u64 / 512 }
+        fn write_sector(&self, _: u64, _: &[u8; 512]) -> Result<(), BlockDeviceError> {
+            Err(BlockDeviceError::NotSupported("read-only test device"))
+        }
+        fn flush(&self) -> Result<(), BlockDeviceError> { Ok(()) }
     }
 
     fn make_sb() -> Superblock {
@@ -359,6 +369,7 @@ mod tests {
             feature_incompat:  0,
             feature_ro_compat: 0,
             inode_size:        256,
+            state:             0x0001,
         }
     }
 

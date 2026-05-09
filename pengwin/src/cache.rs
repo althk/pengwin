@@ -45,4 +45,16 @@ impl<D: BlockDevice + Send + Sync> BlockDevice for CachedBlockDevice<D> {
     fn sector_count(&self) -> u64 {
         self.inner.sector_count()
     }
+
+    fn write_sector(&self, sector_index: u64, buf: &[u8; 512]) -> Result<(), BlockDeviceError> {
+        // Write first, then invalidate — ensures a concurrent reader that misses the cache
+        // after the pop sees the newly written data rather than the pre-write on-disk data.
+        self.inner.write_sector(sector_index, buf)?;
+        self.cache.lock().pop(&sector_index);
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), BlockDeviceError> {
+        self.inner.flush()
+    }
 }

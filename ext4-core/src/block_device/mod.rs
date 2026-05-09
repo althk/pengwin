@@ -14,6 +14,16 @@ pub trait BlockDevice: Send + Sync {
 
     /// Total number of 512-byte sectors on this device.
     fn sector_count(&self) -> u64;
+
+    /// Write exactly 512 bytes to sector `sector_index`.
+    ///
+    /// Implementors must guarantee the write reaches the underlying medium
+    /// before returning Ok — no internal buffering without explicit flush.
+    fn write_sector(&self, sector_index: u64, buf: &[u8; 512]) -> Result<(), BlockDeviceError>;
+
+    /// Flush any OS-level write buffers to physical media.
+    /// Called after every journal commit.
+    fn flush(&self) -> Result<(), BlockDeviceError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +39,18 @@ pub enum BlockDeviceError {
 
     #[error("{0}")]
     NotSupported(&'static str),
+}
+
+pub fn write_sectors(
+    dev: &dyn BlockDevice,
+    start: u64,
+    data: &[u8],
+) -> Result<(), BlockDeviceError> {
+    assert_eq!(data.len() % 512, 0, "data must be sector-aligned");
+    for (i, chunk) in data.chunks_exact(512).enumerate() {
+        dev.write_sector(start + i as u64, chunk.try_into().unwrap())?;
+    }
+    Ok(())
 }
 
 pub fn read_sectors(
@@ -55,22 +77,42 @@ pub fn read_sectors(
 mod tests {
     use super::*;
 
-    pub(super) struct MemoryDevice(pub(super) Vec<u8>);
+    pub(super) struct MemoryDevice(pub(super) std::sync::Mutex<Vec<u8>>);
+
+    impl MemoryDevice {
+        pub(super) fn new(data: Vec<u8>) -> Self { Self(std::sync::Mutex::new(data)) }
+        #[allow(dead_code)]
+        pub(super) fn data_snapshot(&self) -> Vec<u8> { self.0.lock().unwrap().clone() }
+    }
 
     impl BlockDevice for MemoryDevice {
         fn read_sector(&self, sector_index: u64, buf: &mut [u8; 512]) -> Result<(), BlockDeviceError> {
-            let total = self.sector_count();
+            let data = self.0.lock().unwrap();
+            let total = data.len() as u64 / 512;
             if sector_index >= total {
                 return Err(BlockDeviceError::OutOfRange(sector_index, total));
             }
             let offset = sector_index as usize * 512;
-            buf.copy_from_slice(&self.0[offset..offset + 512]);
+            buf.copy_from_slice(&data[offset..offset + 512]);
             Ok(())
         }
 
         fn sector_count(&self) -> u64 {
-            self.0.len() as u64 / 512
+            self.0.lock().unwrap().len() as u64 / 512
         }
+
+        fn write_sector(&self, sector_index: u64, buf: &[u8; 512]) -> Result<(), BlockDeviceError> {
+            let mut data = self.0.lock().unwrap();
+            let total = data.len() as u64 / 512;
+            if sector_index >= total {
+                return Err(BlockDeviceError::OutOfRange(sector_index, total));
+            }
+            let offset = sector_index as usize * 512;
+            data[offset..offset + 512].copy_from_slice(buf);
+            Ok(())
+        }
+
+        fn flush(&self) -> Result<(), BlockDeviceError> { Ok(()) }
     }
 
     fn make_device(sectors: u64) -> MemoryDevice {
@@ -78,7 +120,7 @@ mod tests {
         for (i, b) in data.iter_mut().enumerate() {
             *b = (i % 256) as u8;
         }
-        MemoryDevice(data)
+        MemoryDevice::new(data)
     }
 
     #[test]
@@ -101,7 +143,6 @@ mod tests {
     #[test]
     fn read_sectors_count_overflow() {
         let dev = make_device(4);
-        // u64::MAX * 512 overflows → InvalidGeometry
         let err = read_sectors(&dev, 0, u64::MAX).unwrap_err();
         assert!(matches!(err, BlockDeviceError::InvalidGeometry(_)));
     }
@@ -114,5 +155,44 @@ mod tests {
         assert_eq!(data[0], (512 % 256) as u8);
         assert_eq!(data[512], (1024 % 256) as u8);
         assert_eq!(data[1024], (1536 % 256) as u8);
+    }
+
+    #[test]
+    fn write_and_read_back() {
+        let dev = make_device(4);
+        let mut pattern = [0u8; 512];
+        for (i, b) in pattern.iter_mut().enumerate() {
+            *b = (i ^ 0xAA) as u8;
+        }
+        dev.write_sector(1, &pattern).unwrap();
+        let mut buf = [0u8; 512];
+        dev.read_sector(1, &mut buf).unwrap();
+        assert_eq!(buf, pattern);
+    }
+
+    #[test]
+    fn write_out_of_bounds() {
+        let dev = make_device(2);
+        let buf = [0u8; 512];
+        let err = dev.write_sector(2, &buf).unwrap_err();
+        assert!(matches!(err, BlockDeviceError::OutOfRange(2, 2)));
+    }
+
+    #[test]
+    fn flush_succeeds() {
+        let dev = make_device(2);
+        dev.flush().unwrap();
+    }
+
+    #[test]
+    fn write_sectors_helper() {
+        let dev = make_device(4);
+        let data = vec![0xBBu8; 1024];
+        write_sectors(&dev, 1, &data).unwrap();
+        let mut buf = [0u8; 512];
+        dev.read_sector(1, &mut buf).unwrap();
+        assert!(buf.iter().all(|&b| b == 0xBB));
+        dev.read_sector(2, &mut buf).unwrap();
+        assert!(buf.iter().all(|&b| b == 0xBB));
     }
 }

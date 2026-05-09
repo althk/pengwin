@@ -97,7 +97,7 @@ pub enum GroupDescError {
     TableSizeOverflow,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GroupDescTable {
     groups: Vec<GroupDesc>,
 }
@@ -169,6 +169,24 @@ impl GroupDescTable {
     pub fn from_groups(groups: Vec<GroupDesc>) -> Self {
         GroupDescTable { groups }
     }
+
+    /// Adjust `free_blocks_count` for a group by `delta` (positive = more free, negative = fewer).
+    pub fn adjust_free_blocks(&mut self, group: usize, delta: i64) -> Result<(), GroupDescError> {
+        let n = self.groups.len();
+        let desc = self.groups.get_mut(group)
+            .ok_or(GroupDescError::OutOfRange(group, n))?;
+        desc.free_blocks_count = (desc.free_blocks_count as i64 + delta).max(0) as u32;
+        Ok(())
+    }
+
+    /// Adjust `free_inodes_count` for a group by `delta`.
+    pub fn adjust_free_inodes(&mut self, group: usize, delta: i64) -> Result<(), GroupDescError> {
+        let n = self.groups.len();
+        let desc = self.groups.get_mut(group)
+            .ok_or(GroupDescError::OutOfRange(group, n))?;
+        desc.free_inodes_count = (desc.free_inodes_count as i64 + delta).max(0) as u32;
+        Ok(())
+    }
 }
 
 fn groups_count(sb: &Superblock) -> Result<u64, GroupDescError> {
@@ -203,6 +221,10 @@ mod tests {
             Ok(())
         }
         fn sector_count(&self) -> u64 { self.0.len() as u64 / 512 }
+        fn write_sector(&self, _: u64, _: &[u8; 512]) -> Result<(), BlockDeviceError> {
+            Err(BlockDeviceError::NotSupported("read-only test device"))
+        }
+        fn flush(&self) -> Result<(), BlockDeviceError> { Ok(()) }
     }
 
     /// Superblock for a 4K-block filesystem with one group.
@@ -220,6 +242,7 @@ mod tests {
             feature_incompat: 0,
             feature_ro_compat: 0,
             inode_size:       256,
+            state:            0x0001,
         }
     }
 
@@ -318,6 +341,7 @@ mod tests {
             feature_incompat:  0,
             feature_ro_compat: 0,
             inode_size:        256,
+            state:             0x0001,
         };
         let dev = MemDevice(vec![0u8; 8192]);
         let err = GroupDescTable::load(&dev, &sb).unwrap_err();

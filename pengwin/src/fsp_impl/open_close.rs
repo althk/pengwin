@@ -186,10 +186,11 @@ impl<D: BlockDevice + 'static> Ext4Fs<D> {
 
     pub fn cleanup_handle(
         &self,
-        _context: &FileHandle,
-        _file_name: Option<&U16CStr>,
-        _flags: u32,
+        context: &FileHandle,
+        file_name: Option<&U16CStr>,
+        flags: u32,
     ) {
+        self.cleanup_handle_write(context, file_name, flags);
     }
 
     pub fn close_handle(&self, _context: FileHandle) {}

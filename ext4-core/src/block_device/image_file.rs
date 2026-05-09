@@ -25,6 +25,20 @@ impl ImageFileDevice {
         }
         Ok(Self { file, sector_count: size / 512 })
     }
+
+    /// Open an image file for read-write access.
+    pub fn open_rw(path: &std::path::Path) -> Result<Self, BlockDeviceError> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        let size = metadata.len();
+        if size % 512 != 0 {
+            return Err(BlockDeviceError::InvalidGeometry(size));
+        }
+        Ok(Self { file, sector_count: size / 512 })
+    }
 }
 
 #[cfg(unix)]
@@ -40,18 +54,49 @@ fn read_at_offset(file: &std::fs::File, buf: &mut [u8; 512], offset: u64) -> std
     Ok(())
 }
 
+#[cfg(unix)]
+fn write_at_offset(file: &std::fs::File, buf: &[u8; 512], offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.write_all_at(buf, offset)
+}
+
+#[cfg(windows)]
+fn write_at_offset(file: &std::fs::File, buf: &[u8; 512], offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    file.seek_write(buf, offset)?;
+    Ok(())
+}
+
 impl BlockDevice for ImageFileDevice {
     fn read_sector(&self, sector_index: u64, buf: &mut [u8; 512]) -> Result<(), BlockDeviceError> {
         if sector_index >= self.sector_count {
             return Err(BlockDeviceError::OutOfRange(sector_index, self.sector_count));
         }
-        let offset = sector_index * 512;
+        let offset = sector_index
+            .checked_mul(512)
+            .ok_or(BlockDeviceError::OutOfRange(sector_index, self.sector_count))?;
         read_at_offset(&self.file, buf, offset)?;
         Ok(())
     }
 
     fn sector_count(&self) -> u64 {
         self.sector_count
+    }
+
+    fn write_sector(&self, sector_index: u64, buf: &[u8; 512]) -> Result<(), BlockDeviceError> {
+        if sector_index >= self.sector_count {
+            return Err(BlockDeviceError::OutOfRange(sector_index, self.sector_count));
+        }
+        let offset = sector_index
+            .checked_mul(512)
+            .ok_or(BlockDeviceError::OutOfRange(sector_index, self.sector_count))?;
+        write_at_offset(&self.file, buf, offset)?;
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), BlockDeviceError> {
+        self.file.sync_data()?;
+        Ok(())
     }
 }
 
@@ -120,5 +165,53 @@ mod tests {
         let mut buf = [0u8; 512];
         let err = dev.read_sector(4, &mut buf).unwrap_err();
         assert!(matches!(err, BlockDeviceError::OutOfRange(4, 4)));
+    }
+
+    #[test]
+    fn write_and_read_back() {
+        let data = vec![0u8; 2048];
+        let tmp = make_temp_image(&data);
+        let dev = ImageFileDevice::open_rw(tmp.path()).unwrap();
+        let mut pattern = [0xCCu8; 512];
+        pattern[0] = 0x42;
+        dev.write_sector(1, &pattern).unwrap();
+        let mut buf = [0u8; 512];
+        dev.read_sector(1, &mut buf).unwrap();
+        assert_eq!(buf, pattern);
+    }
+
+    #[test]
+    fn write_out_of_bounds() {
+        let data = vec![0u8; 2048];
+        let tmp = make_temp_image(&data);
+        let dev = ImageFileDevice::open_rw(tmp.path()).unwrap();
+        let buf = [0u8; 512];
+        let err = dev.write_sector(4, &buf).unwrap_err();
+        assert!(matches!(err, BlockDeviceError::OutOfRange(4, 4)));
+    }
+
+    #[test]
+    fn flush_succeeds() {
+        let data = vec![0u8; 1024];
+        let tmp = make_temp_image(&data);
+        let dev = ImageFileDevice::open_rw(tmp.path()).unwrap();
+        dev.flush().unwrap();
+    }
+
+    #[test]
+    fn write_persists_after_reopen() {
+        let data = vec![0u8; 1024];
+        let tmp = make_temp_image(&data);
+        {
+            let dev = ImageFileDevice::open_rw(tmp.path()).unwrap();
+            let mut buf = [0xDEu8; 512];
+            buf[511] = 0xAD;
+            dev.write_sector(0, &buf).unwrap();
+        }
+        let dev2 = ImageFileDevice::open(tmp.path()).unwrap();
+        let mut buf = [0u8; 512];
+        dev2.read_sector(0, &mut buf).unwrap();
+        assert_eq!(buf[0], 0xDE);
+        assert_eq!(buf[511], 0xAD);
     }
 }

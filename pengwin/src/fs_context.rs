@@ -2,26 +2,37 @@ use ext4_core::{
     block_device::BlockDevice,
     superblock::Superblock,
     group_desc::GroupDescTable,
+    journal::writer::JournalWriter,
 };
+use parking_lot::Mutex;
 
 pub struct Ext4Fs<D: BlockDevice> {
-    dev: D,
-    sb: Superblock,
-    gdt: GroupDescTable,
+    pub(crate) dev: D,
+    pub(crate) sb: Superblock,
+    pub(crate) gdt: Mutex<GroupDescTable>,
+    pub(crate) journal: Mutex<JournalWriter>,
 }
 
-impl<D: BlockDevice + 'static> Ext4Fs<D> {
+impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
     /// Open an ext4 filesystem on the given block device.
     pub fn open(dev: D) -> Result<Self, Ext4FsError> {
         let sb = ext4_core::superblock::parse(&dev)?;
         let gdt = GroupDescTable::load(&dev, &sb)?;
+        let journal = ext4_core::journal::check_and_recover(&dev, &sb, &gdt)
+            .map_err(Ext4FsError::Journal)?;
+        let writer = JournalWriter::new(&journal);
         tracing::info!(
             volume_name = %sb.volume_name,
             block_size = sb.block_size,
             blocks = sb.blocks_count,
             "ext4 filesystem opened"
         );
-        Ok(Self { dev, sb, gdt })
+        Ok(Self {
+            dev,
+            sb,
+            gdt: Mutex::new(gdt),
+            journal: Mutex::new(writer),
+        })
     }
 
     pub fn superblock(&self) -> &Superblock {
@@ -30,7 +41,8 @@ impl<D: BlockDevice + 'static> Ext4Fs<D> {
 
     /// Look up an inode by number.
     pub fn inode(&self, num: u32) -> Result<ext4_core::inode::Inode, Ext4FsError> {
-        ext4_core::inode::read_inode(&self.dev, &self.sb, &self.gdt, num)
+        let gdt = self.gdt.lock();
+        ext4_core::inode::read_inode(&self.dev, &self.sb, &gdt, num)
             .map_err(Ext4FsError::from)
     }
 
@@ -39,7 +51,8 @@ impl<D: BlockDevice + 'static> Ext4Fs<D> {
         &self,
         dir_inode: &ext4_core::inode::Inode,
     ) -> Result<Vec<ext4_core::dir::DirEntry>, Ext4FsError> {
-        ext4_core::dir::read_dir(&self.dev, &self.sb, &self.gdt, dir_inode)
+        let gdt = self.gdt.lock();
+        ext4_core::dir::read_dir(&self.dev, &self.sb, &gdt, dir_inode)
             .map_err(Ext4FsError::from)
     }
 
@@ -56,7 +69,6 @@ impl<D: BlockDevice + 'static> Ext4Fs<D> {
             Err(ext4_core::file::FileError::SlowSymlink) => {}
             Err(e) => return Err(Ext4FsError::File(e)),
         }
-        // Slow symlink: target is in the data blocks.
         use std::io::Read;
         let mut reader = ext4_core::file::FileReader::new(&self.dev, &self.sb, inode)
             .map_err(Ext4FsError::File)?;
@@ -74,18 +86,12 @@ impl<D: BlockDevice + 'static> Ext4Fs<D> {
         dir_inode: &ext4_core::inode::Inode,
         name: &str,
     ) -> Result<Option<u32>, Ext4FsError> {
-        ext4_core::dir::lookup(&self.dev, &self.sb, &self.gdt, dir_inode, name)
+        let gdt = self.gdt.lock();
+        ext4_core::dir::lookup(&self.dev, &self.sb, &gdt, dir_inode, name)
             .map_err(Ext4FsError::from)
     }
 
     /// Resolve an absolute path like "/subdir/file.txt" to an inode number.
-    /// Path separator is always '/' (WinFsp normalizes backslashes).
-    ///
-    /// `..` components are rejected — WinFsp normalises paths before calling us, so a
-    /// well-formed request will never contain them. Accepting `..` would allow a crafted
-    /// path to escape the filesystem root on a future write path.
-    ///
-    /// Symlink hops are limited to MAX_SYMLINK_HOPS to prevent infinite loops.
     pub fn resolve_path(&self, path: &str) -> Result<u32, Ext4FsError> {
         self.resolve_path_with_hops(path, 0)
     }
@@ -100,7 +106,6 @@ impl<D: BlockDevice + 'static> Ext4Fs<D> {
             if component == ".." {
                 return Err(Ext4FsError::DotDotNotAllowed);
             }
-            // "." is a no-op — stay on the current inode.
             if component == "." {
                 continue;
             }
@@ -135,7 +140,6 @@ pub enum FileHandle {
     Symlink {
         inode_num: u32,
         inode: ext4_core::inode::Inode,
-        /// Resolved symlink target (Unix path, may be absolute).
         target: String,
     },
 }
@@ -156,6 +160,9 @@ pub enum Ext4FsError {
 
     #[error("file error: {0}")]
     File(#[from] ext4_core::file::FileError),
+
+    #[error("journal error: {0}")]
+    Journal(ext4_core::journal::JournalError),
 
     #[error("path not found: {0}")]
     NotFound(String),

@@ -32,8 +32,7 @@ impl<T: FileSystemContext + 'static> Ext4Host<T> {
             .sectors_per_allocation_unit(8) // 4 KiB clusters
             .file_info_timeout(1000)
             .case_preserved_names(true)
-            .unicode_on_disk(true)
-            .read_only_volume(true);
+            .unicode_on_disk(true);
 
         let host =
             FileSystemHost::new(params, fs).map_err(|e| FspError::HostCreation(e.to_string()))?;
@@ -41,11 +40,15 @@ impl<T: FileSystemContext + 'static> Ext4Host<T> {
     }
 
     pub fn mount(&mut self, mountpoint: &str) -> Result<(), FspError> {
-        // Directory mount points require SeCreateSymbolicLinkPrivilege. Drive
-        // letters (e.g. "Z:") go through DefineDosDevice and don't need it.
+        // Drive letters go through DefineDosDevice and need no special privilege.
+        // Directory mount points use a reparse point; attempt to acquire
+        // SeCreateSymbolicLinkPrivilege but don't hard-fail — on Developer Mode
+        // builds WinFSP can create the mount without it.
         let is_dir_mount = std::path::Path::new(mountpoint).components().count() > 1;
         if is_dir_mount {
-            enable_symlink_privilege()?;
+            if let Err(e) = enable_symlink_privilege() {
+                tracing::debug!("SeCreateSymbolicLinkPrivilege not acquired ({}); proceeding anyway", e);
+            }
         }
         self.host
             .mount(mountpoint)

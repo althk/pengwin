@@ -52,7 +52,8 @@ pub mod incompat {
     // INLINE_DATA stores file data directly in the inode block field; we do not
     // implement it, and silently treating such inodes as extent-based would
     // corrupt reads. Reject any image that uses it.
-    pub const UNSUPPORTED_MASK: u32 = RECOVER | ENCRYPT | INLINE_DATA;
+    // RECOVER is handled by journal replay (task 03); it does not block mounting.
+    pub const UNSUPPORTED_MASK: u32 = ENCRYPT | INLINE_DATA;
 }
 
 pub mod ro_compat {
@@ -63,6 +64,11 @@ pub mod ro_compat {
     pub const DIR_NLINK:    u32 = 0x0020;
     pub const EXTRA_ISIZE:  u32 = 0x0040;
     pub const METADATA_CSUM:u32 = 0x0400;
+}
+
+pub mod state {
+    pub const VALID_FS: u16 = 0x0001;
+    pub const ERROR_FS: u16 = 0x0002;
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +85,12 @@ pub struct Superblock {
     pub feature_incompat:  u32,
     pub feature_ro_compat: u32,
     pub inode_size:        u16,
+    pub state:             u16,
+}
+
+impl Superblock {
+    pub fn state_has_error(&self) -> bool { self.state & state::ERROR_FS != 0 }
+    pub fn was_cleanly_unmounted(&self) -> bool { self.state & state::VALID_FS != 0 }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -178,6 +190,7 @@ pub fn parse(dev: &dyn BlockDevice) -> Result<Superblock, SuperblockError> {
         feature_incompat,
         feature_ro_compat: raw.s_feature_ro_compat.get(),
         inode_size,
+        state:            raw.s_state.get(),
     })
 }
 
@@ -200,6 +213,10 @@ mod tests {
             Ok(())
         }
         fn sector_count(&self) -> u64 { self.0.len() as u64 / 512 }
+        fn write_sector(&self, _: u64, _: &[u8; 512]) -> Result<(), BlockDeviceError> {
+            Err(BlockDeviceError::NotSupported("read-only test device"))
+        }
+        fn flush(&self) -> Result<(), BlockDeviceError> { Ok(()) }
     }
 
     /// Build a minimal 2048-byte device with `sb` installed at byte 1024.
