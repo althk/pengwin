@@ -1,8 +1,8 @@
 # 🐧 Pengwin
 
-**Pengwin** is a high-performance, read-only ext4 filesystem driver for Windows. Built with Rust and powered by WinFsp, it allows you to mount Linux partitions (currently ext4 only) and disk images directly into Windows Explorer with ease.
+**Pengwin** is a fast ext4 filesystem driver for Windows. Built with Rust and powered by WinFsp, it mounts Linux partitions and disk images straight into Windows Explorer.
 
-No more copying files over the network or rebooting into Linux just to grab that one config file. Pengwin brings your Linux data to your Windows fingertips.
+No more copying files over the network or rebooting into Linux to grab that one config file. Read-only by default — because the worst thing a filesystem driver can do is be too eager to help. Opt into writes with `--rw` when you mean it.
 
 ---
 
@@ -17,7 +17,8 @@ Pengwin consists of two main parts:
 
 - **Native Experience**: Mounts as a real drive letter (e.g., `Z:`) or a directory junction.
 - **Blazing Fast**: Uses a custom LRU sector cache to overcome raw disk latency.
-- **Safety First**: Mounts are strictly **read-only**, ensuring your Linux data remains untainted.
+- **Safe by Default**: Mounts read-only unless you pass `--rw`. The OS can't even *try* to write to the underlying image in RO mode.
+- **Write Support**: Full RW mounts with journal replay, allocator, and cleanup-on-unmount — for when you actually want to change something.
 - **Raw Disk Support**: Direct access to physical partitions (e.g., `\\.\Harddisk0Partition5`).
 
 ---
@@ -57,13 +58,21 @@ cd pengwin
 cargo build --release
 ```
 
-### 2. Mount an Image File
+### 2. Mount an Image File (read-only)
 
 ```powershell
 ./target/release/pengwin mount C:\path\to\linux.img Z:
 ```
 
-### 3. Mount a Physical Partition
+### 3. Mount Read-Write
+
+```powershell
+./target/release/pengwin mount --rw C:\path\to\linux.img Z:
+```
+
+`--rw` replays the journal if needed and lets you create, edit, delete, and rename files. Without it, every write call returns `STATUS_MEDIA_WRITE_PROTECTED` — Explorer will tell you the disk is write-protected, which is exactly the point.
+
+### 4. Mount a Physical Partition
 
 Identify your partition (e.g., Partition 5 on Disk 0) and run as Administrator:
 
@@ -71,9 +80,43 @@ Identify your partition (e.g., Partition 5 on Disk 0) and run as Administrator:
 ./target/release/pengwin mount \\.\Harddisk0Partition5 Z:
 ```
 
-### 4. Unmount
+### 5. Dirty Journal? `--force`
 
-Simply press `Ctrl+C` in the terminal where Pengwin is running. It will cleanly unmount the drive and clean up any mount points.
+If the filesystem wasn't cleanly unmounted, RO mode refuses to mount (replay would require writing). Three ways out:
+
+- `--rw` — replay the journal and mount RW.
+- Run `e2fsck` from Linux/WSL — fix it properly.
+- `--force` — RO mount without replay. Uncommitted journal data won't be visible, but your physical drive stays untouched. Useful when e2fsck would itself be a write.
+
+### 6. Unmount
+
+Press `Ctrl+C` in the terminal where Pengwin is running. It cleanly unmounts the drive, flushes the journal (if RW), and removes any mount points.
+
+---
+
+## 🐞 Debugging with `--verbose`
+
+When something looks wrong — a file won't open, a directory shows up empty, writes return errors — re-run with `-v` (or `--verbose`):
+
+```powershell
+./target/release/pengwin mount -v C:\path\to\linux.img Z:
+./target/release/pengwin mount --rw -v \\.\Harddisk0Partition5 Z:
+```
+
+This switches log filtering from `pengwin=info` to `pengwin=debug,ext4_core=debug`, which gets you:
+
+- Every WinFsp dispatch call (`create`, `read`, `write`, `set_delete`, `rename`, …) with arguments and return status.
+- Inode numbers, offsets, and block allocations on the write path.
+- Journal transaction begin/commit boundaries.
+- Path resolution and symlink expansion in the read path.
+
+Logs go to **stderr**, so you can capture them without polluting the mount status line:
+
+```powershell
+./target/release/pengwin mount -v C:\path\to\linux.img Z: 2> pengwin.log
+```
+
+Tip: `--verbose` is verbose. Reproduce the smallest failing operation, then grep the log — `pengwin::dispatch` shows the FSP boundary, `pengwin::write` and `pengwin::delete` show the write paths, and `ext4_core::*` shows what the parser is doing underneath.
 
 ---
 
