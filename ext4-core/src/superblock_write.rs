@@ -28,17 +28,27 @@ pub fn update_superblock(
     free_inodes: u32,
     wtime: u32,
 ) -> Result<(), SuperblockWriteError> {
-    // The superblock is always at byte 1024 = sectors 2-3, regardless of block size.
-    // We read exactly 1024 bytes (2 sectors).
-    let raw_bytes = read_sectors(dev, 2, 2)?;
+    // Which filesystem block holds the superblock, and where within it?
+    // - 1 KiB blocks: superblock is in block 1 (byte offset 1024..2048), at offset 0 within block.
+    // - >=2 KiB blocks: superblock is in block 0 (byte offset 0..block_size), at offset 1024 within block.
+    let (sb_fs_block, sb_offset_in_block): (u64, usize) = if sb.block_size <= 1024 {
+        (1, 0)
+    } else {
+        (0, 1024)
+    };
 
-    if raw_bytes.len() < core::mem::size_of::<RawSuperblock>() {
+    // Read the entire filesystem block so we don't clobber adjacent data.
+    let sectors_per_block = sb.block_size as u64 / 512;
+    let block_start_sector = sb_fs_block * sectors_per_block;
+    let mut block_buf = read_sectors(dev, block_start_sector, sectors_per_block)?;
+
+    let sb_end = sb_offset_in_block + core::mem::size_of::<RawSuperblock>();
+    if block_buf.len() < sb_end {
         return Err(SuperblockWriteError::InvalidBuffer);
     }
 
-    let mut buf = raw_bytes;
     {
-        let raw = RawSuperblock::mut_from(&mut buf[..core::mem::size_of::<RawSuperblock>()])
+        let raw = RawSuperblock::mut_from(&mut block_buf[sb_offset_in_block..sb_end])
             .ok_or(SuperblockWriteError::InvalidBuffer)?;
 
         raw.s_free_blocks_count_lo.set(free_blocks as u32);
@@ -47,12 +57,10 @@ pub fn update_superblock(
     }
 
     // s_wtime is at byte offset 48 within the superblock (mtime=44, wtime=48).
-    // Write directly into buf since _pad3 is private in RawSuperblock.
-    buf[48..52].copy_from_slice(&wtime.to_le_bytes());
+    block_buf[sb_offset_in_block + 48..sb_offset_in_block + 52]
+        .copy_from_slice(&wtime.to_le_bytes());
 
-    // Which filesystem block holds the superblock?
-    let sb_fs_block: u64 = if sb.block_size <= 1024 { 1 } else { 0 };
-    txn.pin_block(sb_fs_block, buf)?;
+    txn.pin_block(sb_fs_block, block_buf)?;
     Ok(())
 }
 
@@ -89,8 +97,9 @@ mod tests {
     }
 
     fn make_env() -> (MemDev, Superblock) {
-        let mut data = vec![0u8; 8 * 512]; // 4 KiB
-        // Write a minimal RawSuperblock at sectors 2-3 (byte 1024).
+        // Device must be large enough for block 0 (4 KiB = 8 sectors).
+        let mut data = vec![0u8; 8 * 512];
+        // Superblock lives at byte offset 1024 within block 0 for 4 KiB block size.
         let mut raw = RawSuperblock::new_zeroed();
         raw.s_magic = U16::new(0xEF53);
         raw.s_free_blocks_count_lo = U32::new(1000);
@@ -126,7 +135,10 @@ mod tests {
         let (blk, data) = &txn.pinned_blocks()[0];
         assert_eq!(*blk, 0); // 4 KiB block size → superblock is in block 0
 
-        let raw = RawSuperblock::read_from(&data[..core::mem::size_of::<RawSuperblock>()]).unwrap();
+        // For block_size >= 2048, superblock sits at byte 1024 within the pinned block.
+        let sb_offset = 1024usize;
+        let sb_end = sb_offset + core::mem::size_of::<RawSuperblock>();
+        let raw = RawSuperblock::read_from(&data[sb_offset..sb_end]).unwrap();
         assert_eq!(raw.s_free_blocks_count_lo.get(), 500u32);
         assert_eq!(raw.s_free_inodes_count.get(), 100u32);
     }

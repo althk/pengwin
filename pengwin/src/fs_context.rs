@@ -1,8 +1,6 @@
 use ext4_core::{
-    block_device::BlockDevice,
+    block_device::BlockDevice, group_desc::GroupDescTable, journal::writer::JournalWriter,
     superblock::Superblock,
-    group_desc::GroupDescTable,
-    journal::writer::JournalWriter,
 };
 use parking_lot::Mutex;
 
@@ -42,10 +40,8 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
         let gdt = GroupDescTable::load(&dev, &sb)?;
 
         let journal = match mode {
-            OpenMode::ReadWrite => {
-                ext4_core::journal::check_and_recover(&dev, &sb, &gdt)
-                    .map_err(Ext4FsError::Journal)?
-            }
+            OpenMode::ReadWrite => ext4_core::journal::check_and_recover(&dev, &sb, &gdt)
+                .map_err(Ext4FsError::Journal)?,
             OpenMode::ReadOnly => {
                 let j = ext4_core::journal::Journal::load(&dev, &sb, &gdt)
                     .map_err(Ext4FsError::Journal)?;
@@ -90,10 +86,6 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
         })
     }
 
-    pub fn is_read_only(&self) -> bool {
-        self.read_only
-    }
-
     pub fn superblock(&self) -> &Superblock {
         &self.sb
     }
@@ -101,8 +93,7 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
     /// Look up an inode by number.
     pub fn inode(&self, num: u32) -> Result<ext4_core::inode::Inode, Ext4FsError> {
         let gdt = self.gdt.lock();
-        ext4_core::inode::read_inode(&self.dev, &self.sb, &gdt, num)
-            .map_err(Ext4FsError::from)
+        ext4_core::inode::read_inode(&self.dev, &self.sb, &gdt, num).map_err(Ext4FsError::from)
     }
 
     /// Read directory entries for a directory inode.
@@ -111,12 +102,15 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
         dir_inode: &ext4_core::inode::Inode,
     ) -> Result<Vec<ext4_core::dir::DirEntry>, Ext4FsError> {
         let gdt = self.gdt.lock();
-        ext4_core::dir::read_dir(&self.dev, &self.sb, &gdt, dir_inode)
-            .map_err(Ext4FsError::from)
+        ext4_core::dir::read_dir(&self.dev, &self.sb, &gdt, dir_inode).map_err(Ext4FsError::from)
     }
 
-    pub fn dev(&self) -> &D { &self.dev }
-    pub fn sb(&self) -> &ext4_core::superblock::Superblock { &self.sb }
+    pub fn dev(&self) -> &D {
+        &self.dev
+    }
+    pub fn sb(&self) -> &ext4_core::superblock::Superblock {
+        &self.sb
+    }
 
     /// Read the target of a symlink inode as a String.
     pub fn read_symlink_target(
@@ -132,10 +126,11 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
         let mut reader = ext4_core::file::FileReader::new(&self.dev, &self.sb, inode)
             .map_err(Ext4FsError::File)?;
         let mut s = String::new();
-        reader.read_to_string(&mut s)
-            .map_err(|e| Ext4FsError::File(ext4_core::file::FileError::BlockDevice(
+        reader.read_to_string(&mut s).map_err(|e| {
+            Ext4FsError::File(ext4_core::file::FileError::BlockDevice(
                 ext4_core::block_device::BlockDeviceError::Io(e),
-            )))?;
+            ))
+        })?;
         Ok(s)
     }
 
@@ -242,7 +237,9 @@ pub enum Ext4FsError {
     #[error("symlink loop detected (too many hops)")]
     SymlinkLoop,
 
-    #[error("journal is dirty — refusing read-only mount; \
-             use --rw to replay, run e2fsck, or pass --force to mount RO without replay")]
+    #[error(
+        "journal is dirty — refusing read-only mount; \
+             use --rw to replay, run e2fsck, or pass --force to mount RO without replay"
+    )]
     DirtyJournalReadOnly,
 }
