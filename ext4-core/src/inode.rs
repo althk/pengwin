@@ -3,6 +3,7 @@ use zerocopy::little_endian::{U16, U32};
 use crate::block_device::{BlockDevice, read_sectors};
 use crate::superblock::Superblock;
 use crate::group_desc::GroupDescTable;
+use crate::journal::writer::Transaction;
 
 pub mod mode {
     pub const S_IFMT:   u16 = 0xF000;
@@ -136,12 +137,50 @@ pub fn read_inode(
         return Err(InodeError::Deleted(inode_num));
     }
 
-    // Linux osd2 layout: uid_hi at bytes 4-5, gid_hi at bytes 6-7.
+    parse_raw(&raw, inode_num)
+}
+
+/// Read `inode_num` from the filesystem, but if the inode-table block is currently
+/// pinned in `txn`, decode the inode from the pinned bytes instead of disk. Use
+/// this whenever the caller is in the middle of a transaction that has already
+/// modified the inode (e.g. between two `dir_add_entry` calls on the same dir).
+pub fn read_inode_with_txn(
+    dev: &dyn BlockDevice,
+    sb: &Superblock,
+    gdt: &GroupDescTable,
+    txn: &Transaction,
+    inode_num: u32,
+) -> Result<Inode, InodeError> {
+    if inode_num == 0 || inode_num > sb.inodes_count {
+        return Err(InodeError::OutOfRange(inode_num, sb.inodes_count));
+    }
+
+    let group = (inode_num - 1) / sb.inodes_per_group;
+    let index_in_group = (inode_num - 1) % sb.inodes_per_group;
+    let desc = gdt.get(group as usize)?;
+    let inode_size = sb.inode_size as usize;
+    let inodes_per_block = sb.block_size as usize / inode_size;
+    let block_index_in_table = (index_in_group as usize) / inodes_per_block;
+    let phys_block = desc.inode_table + block_index_in_table as u64;
+    let offset_in_block = ((index_in_group as usize) % inodes_per_block) * inode_size;
+
+    if let Some((_, pinned)) = txn.pinned_blocks().iter().rev().find(|(b, _)| *b == phys_block) {
+        let raw = RawInode::read_from(&pinned[offset_in_block..offset_in_block + 128])
+            .ok_or(InodeError::InvalidBuffer)?;
+        if raw.i_dtime.get() != 0 {
+            return Err(InodeError::Deleted(inode_num));
+        }
+        return parse_raw(&raw, inode_num);
+    }
+
+    read_inode(dev, sb, gdt, inode_num)
+}
+
+fn parse_raw(raw: &RawInode, _inode_num: u32) -> Result<Inode, InodeError> {
     let uid_lo = raw.i_uid.get() as u32;
     let gid_lo = raw.i_gid.get() as u32;
     let uid_hi = u16::from_le_bytes([raw._osd2[4], raw._osd2[5]]) as u32;
     let gid_hi = u16::from_le_bytes([raw._osd2[6], raw._osd2[7]]) as u32;
-
     Ok(Inode {
         mode:        raw.i_mode.get(),
         uid:         uid_lo | (uid_hi << 16),

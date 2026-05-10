@@ -81,14 +81,31 @@ fn inode_location(sb: &Superblock, gdt: &GroupDescTable, inode_num: u32) -> Resu
     Ok((desc.inode_table + block_index as u64, offset_in_block))
 }
 
-fn read_raw_inode_at(dev: &dyn BlockDevice, sb: &Superblock, table_block: u64, off: usize) -> Result<RawInode, ExtentWriteError> {
-    let data = read_block(dev, sb, table_block)?;
+/// Read a raw inode from `table_block` at byte `off`, preferring the latest
+/// version pinned in `txn` so prior in-txn changes to the block are not lost
+/// by a read-modify-write that hits the disk version.
+fn read_raw_inode_at_with_txn(
+    dev: &dyn BlockDevice,
+    sb: &Superblock,
+    txn: &Transaction,
+    table_block: u64,
+    off: usize,
+) -> Result<RawInode, ExtentWriteError> {
+    let data = match txn.pinned_blocks().iter().rev().find(|(b, _)| *b == table_block) {
+        Some((_, pinned)) => pinned.clone(),
+        None => read_block(dev, sb, table_block)?,
+    };
     let raw = RawInode::read_from(&data[off..off + 128]).ok_or(ExtentWriteError::CorruptTree(0))?;
     Ok(raw)
 }
 
 fn flush_raw_inode(dev: &dyn BlockDevice, sb: &Superblock, txn: &mut Transaction, table_block: u64, off: usize, raw: &RawInode) -> Result<(), ExtentWriteError> {
-    let mut data = read_block(dev, sb, table_block)?;
+    // Use the latest pinned copy if present so concurrent updates to other inodes
+    // in the same table block are preserved.
+    let mut data = match txn.pinned_blocks().iter().rev().find(|(b, _)| *b == table_block) {
+        Some((_, pinned)) => pinned.clone(),
+        None => read_block(dev, sb, table_block)?,
+    };
     data[off..off + 128].copy_from_slice(raw.as_bytes());
     write_block(dev, sb, txn, table_block, data)?;
     Ok(())
@@ -141,6 +158,13 @@ fn update_iblocks(raw: &mut RawInode, sb: &Superblock, added: u16) {
 
 /// Append `block_count` newly-allocated blocks starting at `phys_start`
 /// to the extent tree of `inode_num`. Updates the inode on disk.
+///
+/// Coalesces with the rightmost extent when possible: if the new range is
+/// contiguous in both logical and physical space and the resulting extent
+/// would still fit in `ee_len`'s 15-bit max (32768 blocks), the existing
+/// rightmost leaf entry's `ee_len` is bumped instead of allocating a new
+/// leaf entry. This is what keeps a sequential write of N blocks producing
+/// a single extent rather than N leaves (and overflowing the depth limit).
 pub fn extent_append(
     dev: &dyn BlockDevice,
     sb: &Superblock,
@@ -159,10 +183,17 @@ pub fn extent_append(
     if !uses_extents {
         return Err(ExtentWriteError::NotExtentBased);
     }
-    let mut raw = read_raw_inode_at(dev, sb, table_block, inode_off)?;
+    let mut raw = read_raw_inode_at_with_txn(dev, sb, txn, table_block, inode_off)?;
     let hdr = parse_header(&raw.i_block, 0)?;
 
     if hdr.eh_depth.get() == 0 {
+        // Try to extend the rightmost leaf entry in-place before allocating a new one.
+        if try_coalesce_root_leaf(&mut raw.i_block, phys_start, block_count) {
+            update_iblocks(&mut raw, sb, block_count);
+            flush_raw_inode(dev, sb, txn, table_block, inode_off, &raw)?;
+            return Ok(());
+        }
+
         let entries = hdr.eh_entries.get();
         let max = hdr.eh_max.get();
         let logical = next_logical_block(&raw.i_block);
@@ -191,6 +222,14 @@ pub fn extent_append(
     } else {
         let depth = hdr.eh_depth.get();
         let rightmost_leaf_phys = find_rightmost_leaf(dev, sb, &raw.i_block, depth)?;
+
+        // Try to coalesce into the rightmost leaf block before adding a new entry.
+        if try_coalesce_leaf_block(dev, sb, txn, rightmost_leaf_phys, phys_start, block_count)? {
+            update_iblocks(&mut raw, sb, block_count);
+            flush_raw_inode(dev, sb, txn, table_block, inode_off, &raw)?;
+            return Ok(());
+        }
+
         let logical = logical_next_in_leaf(dev, sb, rightmost_leaf_phys)?;
         let new_leaf = make_leaf_entry(logical, block_count, phys_start);
         append_to_leaf_block(dev, sb, txn, inode_num as u64, rightmost_leaf_phys, new_leaf, alloc, &mut raw.i_block)?;
@@ -199,6 +238,82 @@ pub fn extent_append(
     update_iblocks(&mut raw, sb, block_count);
     flush_raw_inode(dev, sb, txn, table_block, inode_off, &raw)?;
     Ok(())
+}
+
+/// Maximum length of a single (initialized) extent — `ee_len` is u16 with
+/// values >32768 reserved for the "uninitialized" encoding.
+const MAX_EXTENT_LEN: u32 = 32768;
+
+/// If the rightmost leaf of the inline (depth=0) extent tree is contiguous in
+/// both logical and physical space with `(phys_start, block_count)`, extend its
+/// `ee_len` in place and return true. Otherwise return false.
+fn try_coalesce_root_leaf(root: &mut [u8; 60], phys_start: u64, block_count: u16) -> bool {
+    let hdr = match ExtentHeader::read_from(&root[..12]) { Some(h) => h, None => return false };
+    if hdr.eh_depth.get() != 0 { return false; }
+    let entries = hdr.eh_entries.get() as usize;
+    if entries == 0 { return false; }
+    let off = 12 + (entries - 1) * 12;
+    let leaf = match ExtentLeaf::read_from(&root[off..off + 12]) { Some(l) => l, None => return false };
+    coalesce_leaf_in_buf(root, off, &leaf, phys_start, block_count)
+}
+
+/// Same as `try_coalesce_root_leaf` but for a separate leaf block on disk.
+/// Reads the leaf via the txn's pinned view if available.
+fn try_coalesce_leaf_block(
+    dev: &dyn BlockDevice,
+    sb: &Superblock,
+    txn: &mut Transaction,
+    leaf_phys: u64,
+    phys_start: u64,
+    block_count: u16,
+) -> Result<bool, ExtentWriteError> {
+    let mut leaf_data = match txn.pinned_blocks().iter().rev().find(|(b, _)| *b == leaf_phys) {
+        Some((_, d)) => d.clone(),
+        None => read_block(dev, sb, leaf_phys)?,
+    };
+    let hdr = parse_header(&leaf_data, leaf_phys)?;
+    let entries = hdr.eh_entries.get() as usize;
+    if entries == 0 { return Ok(false); }
+    let off = 12 + (entries - 1) * 12;
+    let leaf = ExtentLeaf::read_from(&leaf_data[off..off + 12])
+        .ok_or(ExtentWriteError::CorruptTree(leaf_phys))?;
+
+    if coalesce_leaf_in_buf(&mut leaf_data, off, &leaf, phys_start, block_count) {
+        write_block(dev, sb, txn, leaf_phys, leaf_data)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// If the trailing extent at byte `off` in `buf` is physically contiguous with
+/// `(phys_start, block_count)` and the combined length still fits in a single
+/// initialized extent, rewrite its `ee_len` in place and return true.
+///
+/// `extent_append` always places new blocks at `next_logical_block(tree)`, which
+/// equals the rightmost leaf's `ee_block + ee_len`, so logical contiguity is
+/// implied — only physical contiguity needs to be checked here.
+fn coalesce_leaf_in_buf(
+    buf: &mut [u8],
+    off: usize,
+    leaf: &ExtentLeaf,
+    phys_start: u64,
+    block_count: u16,
+) -> bool {
+    let raw_len = leaf.ee_len.get();
+    // Skip uninitialized extents (ee_len > 32768 is the uninit encoding).
+    if raw_len == 0 || raw_len > MAX_EXTENT_LEN as u16 { return false; }
+    let len = raw_len as u32;
+    let phys_end = ((leaf.ee_start_hi.get() as u64) << 32 | leaf.ee_start_lo.get() as u64)
+        + len as u64;
+    if phys_end != phys_start { return false; }
+
+    let combined = len + block_count as u32;
+    if combined > MAX_EXTENT_LEN { return false; }
+
+    // ee_len lives at byte offset 4 within the 12-byte leaf entry.
+    buf[off + 4..off + 6].copy_from_slice(&(combined as u16).to_le_bytes());
+    true
 }
 
 fn find_rightmost_leaf(dev: &dyn BlockDevice, sb: &Superblock, node_data: &[u8], depth: u16) -> Result<u64, ExtentWriteError> {
@@ -370,7 +485,7 @@ pub fn extent_truncate(
     if !uses_extents {
         return Err(ExtentWriteError::NotExtentBased);
     }
-    let mut raw = read_raw_inode_at(dev, sb, table_block, inode_off)?;
+    let mut raw = read_raw_inode_at_with_txn(dev, sb, txn, table_block, inode_off)?;
 
     let hdr = parse_header(&raw.i_block, 0)?;
     let depth = hdr.eh_depth.get();
@@ -672,6 +787,58 @@ mod tests {
         assert_eq!(leaf.ee_len.get(), 1);
         let phys = (leaf.ee_start_hi.get() as u64) << 32 | leaf.ee_start_lo.get() as u64;
         assert_eq!(phys, 500);
+    }
+
+    /// Sequential physically-contiguous appends must coalesce into one extent.
+    /// This is the property that prevents large sequential writes from blowing
+    /// past the 5-level extent tree depth limit.
+    #[test]
+    fn append_contiguous_coalesces_into_one_extent() {
+        let (dev, sb, mut gdt) = make_env();
+        write_test_inode(&dev, &sb, &gdt, 1, empty_root());
+        let mut txn = Transaction::new(1);
+        let mut alloc = Allocator::new(&dev, &sb, &mut gdt);
+
+        // 10 single-block appends, each starting at the previous extent's end.
+        for i in 0..10u64 {
+            extent_append(&dev, &sb, &mut txn, 1, 500 + i, 1, &mut alloc).unwrap();
+        }
+        drop(alloc);
+        let bd = read_root(&dev, &sb, &gdt, 1);
+        let hdr = ExtentHeader::read_from(&bd[..12]).unwrap();
+        assert_eq!(hdr.eh_depth.get(), 0, "should not have grown");
+        assert_eq!(hdr.eh_entries.get(), 1, "all 10 blocks should fold into one extent");
+        let leaf = ExtentLeaf::read_from(&bd[12..24]).unwrap();
+        assert_eq!(leaf.ee_block.get(), 0);
+        assert_eq!(leaf.ee_len.get(), 10);
+        let phys = (leaf.ee_start_hi.get() as u64) << 32 | leaf.ee_start_lo.get() as u64;
+        assert_eq!(phys, 500);
+    }
+
+    /// Coalescing must stop at the per-extent length ceiling (32768 blocks):
+    /// the next append starts a new extent rather than overflowing `ee_len`.
+    #[test]
+    fn append_stops_coalescing_at_max_extent_len() {
+        let (dev, sb, mut gdt) = make_env();
+        write_test_inode(&dev, &sb, &gdt, 1, empty_root());
+        let mut txn = Transaction::new(1);
+        let mut alloc = Allocator::new(&dev, &sb, &mut gdt);
+
+        // Seed an extent already at the max length; the next contiguous append
+        // must NOT bump it past 32768.
+        extent_append(&dev, &sb, &mut txn, 1, 1000, 32768u16, &mut alloc).unwrap();
+        // ...and immediately another contiguous block.
+        extent_append(&dev, &sb, &mut txn, 1, 1000 + 32768, 1, &mut alloc).unwrap();
+        drop(alloc);
+        let bd = read_root(&dev, &sb, &gdt, 1);
+        let hdr = ExtentHeader::read_from(&bd[..12]).unwrap();
+        assert_eq!(hdr.eh_entries.get(), 2,
+            "second append should start a fresh leaf entry once the first hits ee_len max");
+        let leaf0 = ExtentLeaf::read_from(&bd[12..24]).unwrap();
+        let leaf1 = ExtentLeaf::read_from(&bd[24..36]).unwrap();
+        assert_eq!(leaf0.ee_len.get(), 32768);
+        assert_eq!(leaf1.ee_len.get(), 1);
+        assert_eq!(leaf1.ee_block.get(), 32768);
     }
 
     #[test]

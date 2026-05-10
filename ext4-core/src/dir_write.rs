@@ -1,7 +1,7 @@
 use crate::block_device::{BlockDevice, read_sectors};
 use crate::superblock::Superblock;
 use crate::group_desc::GroupDescTable;
-use crate::inode::{read_inode, FileType};
+use crate::inode::{read_inode, read_inode_with_txn, FileType};
 use crate::extent::{lookup_block, ExtentError};
 use crate::alloc::Allocator;
 use crate::journal::writer::Transaction;
@@ -192,9 +192,11 @@ fn dir_insert_entry(
     child_inode_num: u32,
     file_type: u8,
 ) -> Result<(), DirWriteError> {
-    // Try to fit in an existing block (read from disk — txn may have modified blocks,
-    // but pin_block deduplicates so re-pinning with a modified copy is correct).
-    let inode = read_inode(dev, sb, gdt, dir_inode_num)?;
+    // Use the txn-aware reader: a prior dir_add_entry in the same transaction
+    // may have grown the directory (size update + new extent), and reading from
+    // disk would miss those changes — leaking a fresh empty block per entry and
+    // producing a directory with no "." entry visible from "..".
+    let inode = read_inode_with_txn(dev, sb, gdt, txn, dir_inode_num)?;
     let block_count = inode.size.div_ceil(sb.block_size as u64);
     if block_count > MAX_DIR_BLOCKS {
         return Err(DirWriteError::SizeTooLarge);
@@ -296,7 +298,7 @@ pub fn dir_remove_entry(
     dir_inode_num: u32,
     name: &str,
 ) -> Result<u32, DirWriteError> {
-    let inode = read_inode(dev, sb, gdt, dir_inode_num)?;
+    let inode = read_inode_with_txn(dev, sb, gdt, txn, dir_inode_num)?;
     let block_count = inode.size.div_ceil(sb.block_size as u64);
     if block_count > MAX_DIR_BLOCKS {
         return Err(DirWriteError::SizeTooLarge);
@@ -812,6 +814,58 @@ mod tests {
         let pinned = &txn.pinned_blocks()[0].1;
         let inum = u32::from_le_bytes([pinned[0], pinned[1], pinned[2], pinned[3]]);
         assert_eq!(inum, 0, "first entry inode_num should be zeroed");
+    }
+
+    /// Regression: back-to-back dir_add_entry calls inside the same transaction must
+    /// see each other's size/extent updates. Previously the second call read the
+    /// dir inode from disk (size=0 for a freshly-init'd dir) and allocated a new
+    /// block, leaving "." and ".." in separate blocks — visible as an xcopy
+    /// failure to populate the destination tree.
+    #[test]
+    fn back_to_back_adds_share_txn_inode_view() {
+        let (dev, sb) = make_device();
+        let gdt = make_gdt();
+        let mut gdt_alloc = make_gdt();
+
+        // Pretend inode 3 is a brand-new directory — size 0, no extent yet.
+        let mut new_dir = RawInode::new_zeroed();
+        new_dir.i_mode  = U16::new(mode::S_IFDIR | 0o755);
+        new_dir.i_flags = U32::new(0x80000);
+        new_dir.i_links_count = U16::new(2);
+        // Empty extent header (entries=0, max=4, depth=0).
+        let mut hdr = ExtentHeader::new_zeroed();
+        hdr.eh_magic = U16::new(EXTENT_MAGIC);
+        hdr.eh_max   = U16::new(4);
+        new_dir.i_block[..12].copy_from_slice(hdr.as_bytes());
+        write_inode(&dev, &sb, 3, &new_dir);
+
+        let mut txn = Transaction::new(1);
+        let mut alloc = Allocator::new(&dev, &sb, &mut gdt_alloc);
+        dir_add_entry(&dev, &sb, &gdt, &mut alloc, &mut txn, 3, ".",  3, dir_file_type::DIR).unwrap();
+        dir_add_entry(&dev, &sb, &gdt, &mut alloc, &mut txn, 3, "..", 2, dir_file_type::DIR).unwrap();
+
+        // Find the latest pin of inode 3's table block, decode size and extent.
+        let inode_block = 2u64; // inode_table starts at block 2
+        let pinned = txn.pinned_blocks().iter().rev()
+            .find(|(b, _)| *b == inode_block).unwrap();
+        let raw = RawInode::read_from(&pinned.1[(3 - 1) * 256..(3 - 1) * 256 + 128]).unwrap();
+        let size = raw.i_size_lo.get() as u64;
+        assert_eq!(size, BLOCK_SIZE as u64,
+            "directory should have grown to exactly one block, not been re-allocated per entry");
+
+        let hdr = ExtentHeader::read_from(&raw.i_block[..12]).unwrap();
+        assert_eq!(hdr.eh_entries.get(), 1,
+            "extent tree should have exactly one leaf — both entries share the same block");
+
+        // Read the data block and confirm both "." and ".." are there.
+        let leaf = ExtentLeaf::read_from(&raw.i_block[12..24]).unwrap();
+        let phys = (leaf.ee_start_hi.get() as u64) << 32 | leaf.ee_start_lo.get() as u64;
+        let pinned_data = txn.pinned_blocks().iter().rev()
+            .find(|(b, _)| *b == phys).unwrap();
+        let entries = parse_entries(&pinned_data.1);
+        let names: Vec<&str> = entries.iter().map(|(_, n, _)| n.as_str()).collect();
+        assert!(names.contains(&"."),  "'.' missing: {:?}", names);
+        assert!(names.contains(&".."), "'..' missing: {:?}", names);
     }
 
     #[test]

@@ -313,6 +313,53 @@ mod tests {
         assert_eq!(&out[..], &content[100..150]);
     }
 
+    /// Mirrors the Windows read pattern: a single read with a 4 KiB buffer for a
+    /// file far smaller than that. Returns `n == file_size` and a follow-up read
+    /// at EOF returns 0.
+    #[test]
+    fn read_small_file_with_oversized_buffer() {
+        let content = b"hello world\n";
+        let mut block_content = vec![0u8; BLOCK_SIZE];
+        block_content[..content.len()].copy_from_slice(content);
+
+        let block_data = make_extent_root_leaves(&[(0, 1, 2)]);
+        let inode = make_file_inode(block_data, content.len() as u64);
+        let dev = make_device_with_blocks(&[(2, block_content)]);
+        let sb = make_sb();
+
+        let mut reader = FileReader::new(&dev, &sb, &inode).unwrap();
+        let mut out = vec![0xCDu8; 4096];
+        let n = reader.read(&mut out).unwrap();
+        assert_eq!(n, content.len(), "should report bytes_read == file_size");
+        assert_eq!(&out[..n], content);
+
+        let n2 = reader.read(&mut out).unwrap();
+        assert_eq!(n2, 0);
+    }
+
+    /// Two FileReader instances built from the same inode must return byte-identical
+    /// content. Catches non-determinism in extent lookup or block-device caching.
+    #[test]
+    fn repeated_reads_are_deterministic() {
+        let content = b"hello world\n";
+        let mut block_content = vec![0u8; BLOCK_SIZE];
+        block_content[..content.len()].copy_from_slice(content);
+
+        let block_data = make_extent_root_leaves(&[(0, 1, 2)]);
+        let inode = make_file_inode(block_data, content.len() as u64);
+        let dev = make_device_with_blocks(&[(2, block_content)]);
+        let sb = make_sb();
+
+        let mut a = FileReader::new(&dev, &sb, &inode).unwrap();
+        let mut b = FileReader::new(&dev, &sb, &inode).unwrap();
+        let mut buf_a = vec![0u8; 4096];
+        let mut buf_b = vec![0u8; 4096];
+        let na = a.read(&mut buf_a).unwrap();
+        let nb = b.read(&mut buf_b).unwrap();
+        assert_eq!(na, nb);
+        assert_eq!(&buf_a[..na], &buf_b[..nb]);
+    }
+
     #[test]
     fn read_past_eof() {
         let content = b"short";

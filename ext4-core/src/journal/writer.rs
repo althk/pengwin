@@ -466,15 +466,17 @@ mod tests {
     #[test]
     fn wrap_around() {
         // Use a very small journal (5 blocks: 0=jsb, 1..4=usable) to force wrap.
+        // Device layout: blocks 0..9 free for fs use, 10..14 for journal.
         let (dev, journal) = make_journal(4096, 10, 5);
         let mut writer = JournalWriter::new(&journal);
 
         // Fill the journal with several tiny transactions. Each commit writes
         // 1 descriptor + 1 data + 1 commit = 3 journal blocks, so 1 txn fills blocks 1-3,
-        // 2nd txn needs blocks 4 + wraps to 1.
+        // 2nd txn needs blocks 4 + wraps to 1. fs_block must be inside the device:
+        // commit() now also checkpoints the pinned block to its actual fs location.
         for i in 0u64..2 {
             let mut txn = writer.begin_transaction();
-            txn.pin_block(100 + i, vec![i as u8; 4096]).unwrap();
+            txn.pin_block(2 + i, vec![i as u8; 4096]).unwrap();
             // Should not panic on wrap.
             writer.commit(&dev, txn).unwrap();
         }

@@ -86,7 +86,14 @@ pub fn update_inode(
     let sectors_per_block = sb.block_size as u64 / 512;
     let start_sector = phys_block * sectors_per_block;
 
-    let mut block_data = read_sectors(dev, start_sector, sectors_per_block)?;
+    // Prefer the txn's latest pin of this block (e.g. from a prior init_inode
+    // or update_inode call in the same transaction); fall back to reading from
+    // disk. Reading from disk while the block is pinned would silently revert
+    // earlier in-txn modifications (e.g. a freshly init'd sibling inode).
+    let mut block_data = match txn.pinned_blocks().iter().rev().find(|(b, _)| *b == phys_block) {
+        Some((_, data)) => data.clone(),
+        None => read_sectors(dev, start_sector, sectors_per_block)?,
+    };
 
     let end = offset_within_block
         .checked_add(128)
@@ -229,5 +236,36 @@ mod tests {
         let (_, block_data) = &txn.pinned_blocks()[0];
         let raw = RawInode::read_from(&block_data[0..128]).unwrap();
         assert_eq!(raw.i_links_count.get(), 3u16);
+    }
+
+    /// Two updates in the same txn, targeting different inodes in the same table
+    /// block, must both be visible after commit. Previously the second update
+    /// re-read from disk, clobbering the first.
+    #[test]
+    fn updates_to_two_inodes_in_same_block_are_preserved() {
+        let (dev, sb, gdt) = make_env();
+        let mut txn = Transaction::new(1);
+
+        // inode 1 lives at offset 0; pre-seed inode 2 at offset 256 (inode_size=256).
+        {
+            let inode_table_off = 2 * 4096 + 256;
+            let mut data = dev.0.lock().unwrap();
+            let mut raw = RawInode::new_zeroed();
+            raw.i_mode = U16::new(0o100644);
+            raw.i_links_count = U16::new(1);
+            data[inode_table_off..inode_table_off + 128].copy_from_slice(raw.as_bytes());
+        }
+
+        update_inode(&dev, &sb, &gdt, &mut txn, 1,
+            InodeUpdate::default().with_ctime(0xAAAA_AAAA)).unwrap();
+        update_inode(&dev, &sb, &gdt, &mut txn, 2,
+            InodeUpdate::default().with_ctime(0xBBBB_BBBB)).unwrap();
+
+        // Both inodes should reflect their updates in the latest pinned copy.
+        let (_, latest) = txn.pinned_blocks().last().unwrap();
+        let raw1 = RawInode::read_from(&latest[0..128]).unwrap();
+        let raw2 = RawInode::read_from(&latest[256..256 + 128]).unwrap();
+        assert_eq!(raw1.i_ctime.get(), 0xAAAA_AAAA);
+        assert_eq!(raw2.i_ctime.get(), 0xBBBB_BBBB);
     }
 }

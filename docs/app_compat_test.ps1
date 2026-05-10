@@ -131,6 +131,17 @@ Check "Copy file from ext4 volume to NTFS (contents match)" {
     Copy-Item $seedFile $dst -Force
     $h1 = (Get-FileHash $seedFile   -Algorithm SHA256).Hash
     $h2 = (Get-FileHash $dst        -Algorithm SHA256).Hash
+    if ($h1 -ne $h2) {
+        # Diagnostic: hex-dump both files so we can see exactly which bytes diverge.
+        $b1 = [System.IO.File]::ReadAllBytes($seedFile)
+        $b2 = [System.IO.File]::ReadAllBytes($dst)
+        Write-Host ("    src ({0,4} bytes): {1}" -f $b1.Length,
+            (($b1 | ForEach-Object { '{0:x2}' -f $_ }) -join ' '))
+        Write-Host ("    dst ({0,4} bytes): {1}" -f $b2.Length,
+            (($b2 | ForEach-Object { '{0:x2}' -f $_ }) -join ' '))
+        Write-Host "    src sha256: $h1"
+        Write-Host "    dst sha256: $h2"
+    }
     Remove-Item $dst -ErrorAction SilentlyContinue
     $h1 -eq $h2
 }

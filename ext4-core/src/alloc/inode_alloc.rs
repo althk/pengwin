@@ -60,7 +60,7 @@ pub fn init_inode(
 ) -> Result<(), AllocError> {
     let now = unix_now();
     let (mut table_block, offset, inode_table_block) =
-        load_inode_table_block(dev, sb, gdt, inode_num)?;
+        load_inode_table_block_with_txn(dev, sb, gdt, txn, inode_num)?;
 
     let raw = RawInode::mut_from(&mut table_block[offset..offset + 128])
         .expect("inode slice must be 128 bytes");
@@ -101,7 +101,7 @@ pub fn free_inode(
 
     let now = unix_now();
     let (mut table_block, offset, inode_table_block) =
-        load_inode_table_block(dev, sb, gdt, inode_num)?;
+        load_inode_table_block_with_txn(dev, sb, gdt, txn, inode_num)?;
     let raw = RawInode::mut_from(&mut table_block[offset..offset + 128])
         .expect("inode slice must be 128 bytes");
     raw.i_dtime = U32::new(now);
@@ -174,6 +174,24 @@ fn flush_inode_table(
     write_sectors(dev, start_sector, &padded)?;
     txn.pin_block(inode_table_block, padded).ok();
     Ok(())
+}
+
+/// Read `inode_table_block`, preferring the latest version pinned in `txn` so
+/// that pending in-transaction modifications to neighbouring inodes are not
+/// silently reverted when this function reads-modify-writes the block.
+fn load_inode_table_block_with_txn(
+    dev: &dyn BlockDevice,
+    sb: &Superblock,
+    gdt: &GroupDescTable,
+    txn: &Transaction,
+    inode_num: u32,
+) -> Result<(Vec<u8>, usize, u64), AllocError> {
+    let (disk_data, offset, target_block) = load_inode_table_block(dev, sb, gdt, inode_num)?;
+    let data = match txn.pinned_blocks().iter().rev().find(|(b, _)| *b == target_block) {
+        Some((_, pinned)) => pinned.clone(),
+        None => disk_data,
+    };
+    Ok((data, offset, target_block))
 }
 
 fn update_gdt_free_inodes(
