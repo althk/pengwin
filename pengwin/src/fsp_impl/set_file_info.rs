@@ -6,6 +6,7 @@ use windows::Win32::Foundation::STATUS_INTERNAL_ERROR;
 
 use crate::fs_context::{Ext4Fs, FileHandle};
 use crate::fsp_impl::file_info::file_info_from_inode;
+use crate::fsp_impl::STATUS_MEDIA_WRITE_PROTECTED;
 
 fn inode_num_from_handle(handle: &FileHandle) -> u32 {
     match handle {
@@ -33,6 +34,9 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
         last_change_time: u64,
         file_info: &mut FileInfo,
     ) -> Result<()> {
+        if self.read_only {
+            return Err(STATUS_MEDIA_WRITE_PROTECTED.into());
+        }
         let inode_num = inode_num_from_handle(context);
 
         let mut upd = InodeUpdate::default();

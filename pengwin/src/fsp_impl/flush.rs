@@ -12,15 +12,17 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
         context: Option<&FileHandle>,
         file_info: &mut FileInfo,
     ) -> Result<()> {
-        // Flush pending journal state (no-op in current single-txn-per-op model).
-        {
-            let mut journal = self.journal.lock();
-            journal.flush_pending(&self.dev)
-                .map_err(|_| STATUS_INTERNAL_ERROR)?;
-        }
+        if !self.read_only {
+            // Flush pending journal state (no-op in current single-txn-per-op model).
+            {
+                let mut journal = self.journal.lock();
+                journal.flush_pending(&self.dev)
+                    .map_err(|_| STATUS_INTERNAL_ERROR)?;
+            }
 
-        // Write barrier: flush to underlying storage.
-        self.dev.flush().map_err(|_| STATUS_INTERNAL_ERROR)?;
+            // Write barrier: flush to underlying storage.
+            self.dev.flush().map_err(|_| STATUS_INTERNAL_ERROR)?;
+        }
 
         if let Some(handle) = context {
             let (inode, inode_num) = match handle {

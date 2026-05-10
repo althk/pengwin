@@ -12,7 +12,7 @@ use windows::Win32::Foundation::{
 
 use crate::fs_context::{Ext4Fs, FileHandle};
 use crate::fsp_impl::file_info::file_info_from_inode;
-use crate::fsp_impl::now;
+use crate::fsp_impl::{now, STATUS_MEDIA_WRITE_PROTECTED};
 
 /// Split "/parent/dir/name" into ("/parent/dir", "name").
 pub(crate) fn split_path(path: &str) -> Option<(&str, &str)> {
@@ -39,6 +39,10 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
         file_info: &mut OpenFileInfo,
     ) -> Result<FileHandle> {
         const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
+
+        if self.read_only {
+            return Err(STATUS_MEDIA_WRITE_PROTECTED.into());
+        }
 
         let path = file_name.to_string_lossy();
         let path = path.replace('\\', "/");

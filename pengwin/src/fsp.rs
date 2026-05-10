@@ -25,7 +25,7 @@ pub struct Ext4Host<T: FileSystemContext> {
 }
 
 impl<T: FileSystemContext + 'static> Ext4Host<T> {
-    pub fn new(fs: T) -> Result<Self, FspError> {
+    pub fn new(fs: T, read_only: bool) -> Result<Self, FspError> {
         let mut params = VolumeParams::default();
         params
             .sector_size(512)
@@ -35,7 +35,7 @@ impl<T: FileSystemContext + 'static> Ext4Host<T> {
             .case_sensitive_search(true)
             .case_preserved_names(true)
             .unicode_on_disk(true)
-            .read_only_volume(false)
+            .read_only_volume(read_only)
             .post_cleanup_when_modified_only(true)
             .flush_and_purge_on_cleanup(false);
 

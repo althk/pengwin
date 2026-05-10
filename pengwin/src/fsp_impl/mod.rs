@@ -12,6 +12,11 @@ pub mod rename;
 pub mod set_file_info;
 pub mod flush;
 
+/// NTSTATUS returned for write attempts on a read-only mount.
+/// Maps to the "media is write-protected" error in Win32.
+pub(crate) const STATUS_MEDIA_WRITE_PROTECTED: windows::Win32::Foundation::NTSTATUS =
+    windows::Win32::Foundation::NTSTATUS(0xC000_00A2u32 as i32);
+
 /// Current time as a Unix timestamp (seconds since epoch).
 pub(crate) fn now() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};

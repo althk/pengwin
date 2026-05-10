@@ -11,20 +11,74 @@ pub struct Ext4Fs<D: BlockDevice> {
     pub(crate) sb: Superblock,
     pub(crate) gdt: Mutex<GroupDescTable>,
     pub(crate) journal: Mutex<JournalWriter>,
+    pub(crate) read_only: bool,
 }
 
 impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
-    /// Open an ext4 filesystem on the given block device.
+    /// Open the filesystem read-only. Refuses to mount if the journal is dirty
+    /// (would require replay, which writes to the device).
+    ///
+    /// Use [`open_rw`](Self::open_rw) for write access, or [`open_ro_force`](Self::open_ro_force)
+    /// to mount RO without replay even if the journal is dirty.
     pub fn open(dev: D) -> Result<Self, Ext4FsError> {
+        Self::open_inner(dev, OpenMode::ReadOnly)
+    }
+
+    /// Open the filesystem read-write. Replays the journal if needed.
+    pub fn open_rw(dev: D) -> Result<Self, Ext4FsError> {
+        Self::open_inner(dev, OpenMode::ReadWrite)
+    }
+
+    /// Open read-only, skipping journal replay even when the journal is dirty.
+    /// The on-disk view will reflect the last cleanly committed state; uncommitted
+    /// journal contents are not visible. Intended as an escape hatch when
+    /// e2fsck is undesirable (e.g. read-only physical media).
+    pub fn open_ro_force(dev: D) -> Result<Self, Ext4FsError> {
+        Self::open_inner(dev, OpenMode::ReadOnlyForce)
+    }
+
+    fn open_inner(dev: D, mode: OpenMode) -> Result<Self, Ext4FsError> {
         let sb = ext4_core::superblock::parse(&dev)?;
         let gdt = GroupDescTable::load(&dev, &sb)?;
-        let journal = ext4_core::journal::check_and_recover(&dev, &sb, &gdt)
-            .map_err(Ext4FsError::Journal)?;
+
+        let journal = match mode {
+            OpenMode::ReadWrite => {
+                ext4_core::journal::check_and_recover(&dev, &sb, &gdt)
+                    .map_err(Ext4FsError::Journal)?
+            }
+            OpenMode::ReadOnly => {
+                let j = ext4_core::journal::Journal::load(&dev, &sb, &gdt)
+                    .map_err(Ext4FsError::Journal)?;
+                if j.sb.errno != 0 {
+                    return Err(Ext4FsError::Journal(
+                        ext4_core::journal::JournalError::JournalErrno(j.sb.errno),
+                    ));
+                }
+                if j.sb.needs_recovery() {
+                    return Err(Ext4FsError::DirtyJournalReadOnly);
+                }
+                j
+            }
+            OpenMode::ReadOnlyForce => {
+                let j = ext4_core::journal::Journal::load(&dev, &sb, &gdt)
+                    .map_err(Ext4FsError::Journal)?;
+                if j.sb.needs_recovery() {
+                    tracing::warn!(
+                        "mounting read-only with dirty journal (--force); \
+                         uncommitted journal contents will not be visible"
+                    );
+                }
+                j
+            }
+        };
+
         let writer = JournalWriter::new(&journal);
+        let read_only = !matches!(mode, OpenMode::ReadWrite);
         tracing::info!(
             volume_name = %sb.volume_name,
             block_size = sb.block_size,
             blocks = sb.blocks_count,
+            read_only,
             "ext4 filesystem opened"
         );
         Ok(Self {
@@ -32,7 +86,12 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
             sb,
             gdt: Mutex::new(gdt),
             journal: Mutex::new(writer),
+            read_only,
         })
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     pub fn superblock(&self) -> &Superblock {
@@ -126,6 +185,13 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
 /// Maximum number of symlink hops allowed during path resolution.
 const MAX_SYMLINK_HOPS: u32 = 40;
 
+#[derive(Copy, Clone, Debug)]
+enum OpenMode {
+    ReadOnly,
+    ReadOnlyForce,
+    ReadWrite,
+}
+
 /// Per-handle context for an open file or directory.
 pub enum FileHandle {
     File {
@@ -175,4 +241,8 @@ pub enum Ext4FsError {
 
     #[error("symlink loop detected (too many hops)")]
     SymlinkLoop,
+
+    #[error("journal is dirty — refusing read-only mount; \
+             use --rw to replay, run e2fsck, or pass --force to mount RO without replay")]
+    DirtyJournalReadOnly,
 }

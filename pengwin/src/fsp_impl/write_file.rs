@@ -10,7 +10,7 @@ use windows::Win32::Foundation::{
 
 use crate::fs_context::{Ext4Fs, FileHandle};
 use crate::fsp_impl::file_info::file_info_from_inode;
-use crate::fsp_impl::now;
+use crate::fsp_impl::{now, STATUS_MEDIA_WRITE_PROTECTED};
 
 impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
     pub fn write_file_data_cb(
@@ -22,6 +22,10 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
         constrained_io: bool,
         file_info: &mut FileInfo,
     ) -> Result<u32> {
+        if self.read_only {
+            return Err(STATUS_MEDIA_WRITE_PROTECTED.into());
+        }
+
         let inode_num = match context {
             FileHandle::File { inode_num, .. } => *inode_num,
             _ => return Err(STATUS_INVALID_DEVICE_REQUEST.into()),

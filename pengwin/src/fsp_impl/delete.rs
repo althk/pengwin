@@ -11,7 +11,7 @@ use windows::Win32::Foundation::{
 
 use crate::fs_context::{Ext4Fs, FileHandle};
 use crate::fsp_impl::create::split_path;
-use crate::fsp_impl::now;
+use crate::fsp_impl::{now, STATUS_MEDIA_WRITE_PROTECTED};
 
 // FspCleanupDelete flag value from WinFsp.
 const FSP_CLEANUP_DELETE: u32 = 0x01;
@@ -25,6 +25,9 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
     ) -> Result<()> {
         if !delete_file {
             return Ok(());
+        }
+        if self.read_only {
+            return Err(STATUS_MEDIA_WRITE_PROTECTED.into());
         }
 
         let inode = match context {
@@ -52,6 +55,10 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
     ) {
         tracing::debug!(target: "pengwin::delete", "cleanup_handle_write flags=0x{flags:x} has_name={}", file_name.is_some());
         if flags & FSP_CLEANUP_DELETE == 0 {
+            return;
+        }
+        if self.read_only {
+            tracing::debug!(target: "pengwin::delete", "cleanup_handle_write: ignored (read-only mount)");
             return;
         }
 

@@ -10,6 +10,7 @@ use windows::Win32::Foundation::{
 
 use crate::fs_context::{Ext4Fs, FileHandle};
 use crate::fsp_impl::create::split_path;
+use crate::fsp_impl::STATUS_MEDIA_WRITE_PROTECTED;
 
 impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
     pub fn rename_handle(
@@ -19,6 +20,9 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
         new_file_name: &U16CStr,
         replace_if_exists: bool,
     ) -> Result<()> {
+        if self.read_only {
+            return Err(STATUS_MEDIA_WRITE_PROTECTED.into());
+        }
         let src_str = file_name.to_string_lossy();
         let src = src_str.replace('\\', "/");
         let dst_str = new_file_name.to_string_lossy();

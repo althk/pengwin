@@ -18,10 +18,12 @@ fn main() {
         Command::Mount {
             source,
             drive,
+            rw,
+            force,
             verbose,
         } => {
             init_logging(verbose);
-            if let Err(e) = cmd_mount(&source, &drive) {
+            if let Err(e) = cmd_mount(&source, &drive, rw, force) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
@@ -56,9 +58,18 @@ fn normalize_drive_letter(drive: &str) -> Result<String, String> {
     return Ok(drive.to_string());
 }
 
-fn cmd_mount(source: &str, drive: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_mount(
+    source: &str,
+    drive: &str,
+    rw: bool,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _fsp_init = fsp::check_winfsp_installed()?;
     let mountpoint = normalize_drive_letter(drive).map_err(|e| e)?;
+
+    if rw && force {
+        eprintln!("warning: --force is ignored when --rw is set");
+    }
 
     let is_raw_disk = source.starts_with(r"\\.\") || source.starts_with(r"\\?\");
 
@@ -72,15 +83,37 @@ fn cmd_mount(source: &str, drive: &str) -> Result<(), Box<dyn std::error::Error>
                 std::path::Path::new(source),
             )?;
             let dev = CachedBlockDevice::new(dev, 4096);
-            mount_fs(Ext4Fs::open(dev)?, source, drive, &mountpoint)
+            mount_fs(open_fs(dev, rw, force)?, source, drive, &mountpoint, rw)
         }
     } else {
-        let dev = ext4_core::block_device::image_file::ImageFileDevice::open_rw(
-            std::path::Path::new(source),
-        )?;
-        let dev = CachedBlockDevice::new(dev, 4096);
-        mount_fs(Ext4Fs::open(dev)?, source, drive, &mountpoint)
+        // Open the underlying image RW only when caller asked for RW.
+        // RO mode opens the file without write permission so an OS-level
+        // bug or stray write cannot reach the image.
+        let path = std::path::Path::new(source);
+        if rw {
+            let dev = ext4_core::block_device::image_file::ImageFileDevice::open_rw(path)?;
+            let dev = CachedBlockDevice::new(dev, 4096);
+            mount_fs(open_fs(dev, rw, force)?, source, drive, &mountpoint, rw)
+        } else {
+            let dev = ext4_core::block_device::image_file::ImageFileDevice::open(path)?;
+            let dev = CachedBlockDevice::new(dev, 4096);
+            mount_fs(open_fs(dev, rw, force)?, source, drive, &mountpoint, rw)
+        }
     }
+}
+
+fn open_fs<D>(dev: D, rw: bool, force: bool) -> Result<Ext4Fs<D>, Box<dyn std::error::Error>>
+where
+    D: ext4_core::block_device::BlockDevice + Send + Sync + 'static,
+{
+    let fs = if rw {
+        Ext4Fs::open_rw(dev)?
+    } else if force {
+        Ext4Fs::open_ro_force(dev)?
+    } else {
+        Ext4Fs::open(dev)?
+    };
+    Ok(fs)
 }
 
 fn mount_fs<D>(
@@ -88,13 +121,15 @@ fn mount_fs<D>(
     source: &str,
     drive: &str,
     mountpoint: &str,
+    rw: bool,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     D: ext4_core::block_device::BlockDevice + Send + Sync + 'static,
 {
-    tracing::info!(source, mountpoint, "mounting ext4 filesystem");
+    let read_only = !rw;
+    tracing::info!(source, mountpoint, read_only, "mounting ext4 filesystem");
 
-    let mut host = fsp::Ext4Host::new(fs)?;
+    let mut host = fsp::Ext4Host::new(fs, read_only)?;
     host.mount(mountpoint)?;
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -103,9 +138,10 @@ where
     })?;
 
     host.start()?;
+    let mode = if read_only { "read-only" } else { "read-write" };
     println!(
-        "Mounted {} at {}. Press Ctrl+C to unmount.",
-        source, drive
+        "Mounted {} at {} ({}). Press Ctrl+C to unmount.",
+        source, drive, mode
     );
     rx.recv().ok();
     host.stop();
