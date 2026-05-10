@@ -59,15 +59,22 @@ impl<D: BlockDevice + Send + Sync + 'static> FileSystemContext for Ext4Fs<D> {
     }
 
     fn cleanup(&self, context: &Self::FileContext, file_name: Option<&U16CStr>, flags: u32) {
+        tracing::debug!(target: "pengwin::dispatch", "cleanup ENTRY flags=0x{flags:x}");
         self.cleanup_handle(context, file_name, flags);
+        tracing::debug!(target: "pengwin::dispatch", "cleanup EXIT");
     }
 
     fn close(&self, context: Self::FileContext) {
+        tracing::debug!(target: "pengwin::dispatch", "close ENTRY");
         self.close_handle(context);
+        tracing::debug!(target: "pengwin::dispatch", "close EXIT");
     }
 
     fn get_file_info(&self, context: &Self::FileContext, file_info: &mut FileInfo) -> Result<()> {
-        self.file_info_for_handle(context, file_info)
+        tracing::debug!(target: "pengwin::dispatch", "get_file_info ENTRY");
+        let r = self.file_info_for_handle(context, file_info);
+        tracing::debug!(target: "pengwin::dispatch", "get_file_info EXIT ok={}", r.is_ok());
+        r
     }
 
     fn read_directory(
@@ -93,7 +100,10 @@ impl<D: BlockDevice + Send + Sync + 'static> FileSystemContext for Ext4Fs<D> {
         constrained_io: bool,
         file_info: &mut FileInfo,
     ) -> Result<u32> {
-        self.write_file_data_cb(context, buffer, offset, write_to_eof, constrained_io, file_info)
+        tracing::debug!(target: "pengwin::dispatch", "write ENTRY len={} off={offset} eof={write_to_eof} cstr={constrained_io}", buffer.len());
+        let r = self.write_file_data_cb(context, buffer, offset, write_to_eof, constrained_io, file_info);
+        tracing::debug!(target: "pengwin::dispatch", "write EXIT ok={}", r.is_ok());
+        r
     }
 
     fn set_file_size(
@@ -103,7 +113,10 @@ impl<D: BlockDevice + Send + Sync + 'static> FileSystemContext for Ext4Fs<D> {
         set_allocation_size: bool,
         file_info: &mut FileInfo,
     ) -> Result<()> {
-        self.set_file_size_cb(context, new_size, set_allocation_size, file_info)
+        tracing::debug!(target: "pengwin::dispatch", "set_file_size ENTRY new_size={new_size} set_alloc={set_allocation_size}");
+        let r = self.set_file_size_cb(context, new_size, set_allocation_size, file_info);
+        tracing::debug!(target: "pengwin::dispatch", "set_file_size EXIT ok={}", r.is_ok());
+        r
     }
 
     fn set_basic_info(
@@ -116,7 +129,8 @@ impl<D: BlockDevice + Send + Sync + 'static> FileSystemContext for Ext4Fs<D> {
         last_change_time: u64,
         file_info: &mut FileInfo,
     ) -> Result<()> {
-        self.set_basic_info_cb(
+        tracing::debug!(target: "pengwin::dispatch", "set_basic_info ENTRY");
+        let r = self.set_basic_info_cb(
             context,
             file_attributes,
             creation_time,
@@ -124,7 +138,9 @@ impl<D: BlockDevice + Send + Sync + 'static> FileSystemContext for Ext4Fs<D> {
             last_write_time,
             last_change_time,
             file_info,
-        )
+        );
+        tracing::debug!(target: "pengwin::dispatch", "set_basic_info EXIT ok={}", r.is_ok());
+        r
     }
 
     fn set_delete(
@@ -133,7 +149,10 @@ impl<D: BlockDevice + Send + Sync + 'static> FileSystemContext for Ext4Fs<D> {
         file_name: &U16CStr,
         delete_file: bool,
     ) -> Result<()> {
-        self.set_delete_cb(context, file_name, delete_file)
+        tracing::debug!(target: "pengwin::dispatch", "set_delete ENTRY delete={delete_file}");
+        let r = self.set_delete_cb(context, file_name, delete_file);
+        tracing::debug!(target: "pengwin::dispatch", "set_delete EXIT ok={}", r.is_ok());
+        r
     }
 
     fn rename(
@@ -143,11 +162,17 @@ impl<D: BlockDevice + Send + Sync + 'static> FileSystemContext for Ext4Fs<D> {
         new_file_name: &U16CStr,
         replace_if_exists: bool,
     ) -> Result<()> {
-        self.rename_handle(context, file_name, new_file_name, replace_if_exists)
+        tracing::debug!(target: "pengwin::dispatch", "rename ENTRY");
+        let r = self.rename_handle(context, file_name, new_file_name, replace_if_exists);
+        tracing::debug!(target: "pengwin::dispatch", "rename EXIT ok={}", r.is_ok());
+        r
     }
 
     fn flush(&self, context: Option<&Self::FileContext>, file_info: &mut FileInfo) -> Result<()> {
-        self.flush_cb(context, file_info)
+        tracing::debug!(target: "pengwin::dispatch", "flush ENTRY");
+        let r = self.flush_cb(context, file_info);
+        tracing::debug!(target: "pengwin::dispatch", "flush EXIT ok={}", r.is_ok());
+        r
     }
 
     fn get_reparse_point(

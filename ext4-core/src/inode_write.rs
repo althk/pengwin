@@ -173,6 +173,7 @@ mod tests {
             inode_table: 2,
             free_blocks_count: 0,
             free_inodes_count: 0,
+            itable_unused: 0,
         }];
         let sb = Superblock {
             block_size:        4096,

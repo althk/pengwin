@@ -28,12 +28,12 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
         let (dst_parent, dst_name) = split_path(&dst).ok_or(STATUS_OBJECT_NAME_INVALID)?;
 
         let dst_parent_inode_num = self.resolve_path(dst_parent)
-            .map_err(|_| STATUS_OBJECT_PATH_NOT_FOUND)?;
+            .map_err(|e| { tracing::error!(dst_parent, "rename: resolve dst_parent: {e}"); STATUS_OBJECT_PATH_NOT_FOUND })?;
         let dst_parent_inode = self.inode(dst_parent_inode_num)
-            .map_err(|_| STATUS_INTERNAL_ERROR)?;
+            .map_err(|e| { tracing::error!(dst_parent_inode_num, "rename: read dst_parent inode: {e}"); STATUS_INTERNAL_ERROR })?;
 
         if self.lookup(&dst_parent_inode, dst_name)
-            .map_err(|_| STATUS_INTERNAL_ERROR)?
+            .map_err(|e| { tracing::error!(dst_name, "rename: lookup dst: {e}"); STATUS_INTERNAL_ERROR })?
             .is_some()
             && !replace_if_exists
         {
@@ -41,7 +41,7 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
         }
 
         let src_parent_inode_num = self.resolve_path(src_parent)
-            .map_err(|_| STATUS_OBJECT_PATH_NOT_FOUND)?;
+            .map_err(|e| { tracing::error!(src_parent, "rename: resolve src_parent: {e}"); STATUS_OBJECT_PATH_NOT_FOUND })?;
 
         let mut journal = self.journal.lock();
         let mut txn = journal.begin_transaction();
@@ -54,10 +54,10 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
             dir_rename(&self.dev, &self.sb, &gdt_snap, &mut alloc, &mut txn,
                 src_parent_inode_num, src_name,
                 dst_parent_inode_num, dst_name)
-                .map_err(|_| STATUS_INTERNAL_ERROR)?;
+                .map_err(|e| { tracing::error!(src_parent_inode_num, src_name, dst_parent_inode_num, dst_name, "rename: dir_rename: {e}"); STATUS_INTERNAL_ERROR })?;
         }
 
-        journal.commit(&self.dev, txn).map_err(|_| STATUS_INTERNAL_ERROR)?;
+        journal.commit(&self.dev, txn).map_err(|e| { tracing::error!("rename: journal.commit: {e}"); STATUS_INTERNAL_ERROR })?;
         Ok(())
     }
 }

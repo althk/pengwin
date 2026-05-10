@@ -8,11 +8,11 @@ use windows::Win32::Foundation::STATUS_OBJECT_NAME_NOT_FOUND;
 
 use crate::fs_context::Ext4Fs;
 
-/// Pre-computed DACL: O:S-1-1-0G:S-1-1-0D:P(A;;0x120089;;;WD)
+/// Pre-computed DACL: O:S-1-1-0G:S-1-1-0D:P(A;;0x1f01ff;;;WD)
 /// This is a self-relative security descriptor with:
 /// - Owner: S-1-1-0 (Everyone)
 /// - Group: S-1-1-0 (Everyone)
-/// - DACL: Present, Protected, one ACE: Allow FILE_GENERIC_READ for Everyone (S-1-1-0)
+/// - DACL: Present, Protected, one ACE: Allow FILE_ALL_ACCESS for Everyone (S-1-1-0)
 const FIXED_SD: &[u8] = &[
     0x01, 0x00, 0x04, 0x80, // Revision 1, Padding 0, Control 0x8004 (SE_SELF_RELATIVE | SE_DACL_PRESENT)
     0x30, 0x00, 0x00, 0x00, // Owner offset 0x30 (48)
@@ -26,7 +26,7 @@ const FIXED_SD: &[u8] = &[
 
     // ACE (offset 0x1C)
     0x00, 0x00, 0x14, 0x00, // AceType 0 (ACCESS_ALLOWED), AceFlags 0, AceSize 20
-    0x89, 0x00, 0x12, 0x00, // Mask 0x00120089 (FILE_GENERIC_READ)
+    0xff, 0x01, 0x1f, 0x00, // Mask 0x001f01ff (FILE_ALL_ACCESS)
     0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, // SID S-1-1-0 (Everyone)
 
     // Owner SID (offset 0x30)
@@ -44,9 +44,13 @@ impl<D: BlockDevice + 'static> Ext4Fs<D> {
     ) -> Result<FileSecurity> {
         let path = file_name.to_string_lossy();
         let path = path.replace('\\', "/");
+        tracing::debug!(target: "pengwin::sec", "security_by_name path={path}");
 
         let inode_num = self.resolve_path(&path)
-            .map_err(|_| STATUS_OBJECT_NAME_NOT_FOUND)?;
+            .map_err(|_| {
+                tracing::debug!(target: "pengwin::sec", "security_by_name NOT_FOUND path={path}");
+                STATUS_OBJECT_NAME_NOT_FOUND
+            })?;
         let inode = self.inode(inode_num)
             .map_err(|_| STATUS_OBJECT_NAME_NOT_FOUND)?;
 
@@ -71,9 +75,9 @@ impl<D: BlockDevice + 'static> Ext4Fs<D> {
 
 pub(crate) fn inode_to_file_attributes(inode: &ext4_core::inode::Inode) -> u32 {
     use windows::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
     };
-    let mut attrs = FILE_ATTRIBUTE_READONLY.0;
+    let mut attrs = FILE_ATTRIBUTE_NORMAL.0;
     if inode.is_dir() {
         attrs |= FILE_ATTRIBUTE_DIRECTORY.0;
     }

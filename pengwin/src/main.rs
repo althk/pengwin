@@ -75,7 +75,7 @@ fn cmd_mount(source: &str, drive: &str) -> Result<(), Box<dyn std::error::Error>
             mount_fs(Ext4Fs::open(dev)?, source, drive, &mountpoint)
         }
     } else {
-        let dev = ext4_core::block_device::image_file::ImageFileDevice::open(
+        let dev = ext4_core::block_device::image_file::ImageFileDevice::open_rw(
             std::path::Path::new(source),
         )?;
         let dev = CachedBlockDevice::new(dev, 4096);
@@ -104,7 +104,7 @@ where
 
     host.start()?;
     println!(
-        "Mounted {} at {} (read-only). Press Ctrl+C to unmount.",
+        "Mounted {} at {}. Press Ctrl+C to unmount.",
         source, drive
     );
     rx.recv().ok();

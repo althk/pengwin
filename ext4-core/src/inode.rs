@@ -218,6 +218,7 @@ mod tests {
             inode_table:       inode_table_block,
             free_blocks_count: 0,
             free_inodes_count: 0,
+            itable_unused:     0,
         }];
         let gdt = GroupDescTable::from_groups(groups);
         (dev, gdt)

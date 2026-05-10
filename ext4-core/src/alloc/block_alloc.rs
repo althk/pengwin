@@ -100,8 +100,20 @@ fn update_gdt_free_blocks(
     let gdt_block = sb.first_data_block as u64 + 1;
     let sectors_per_block = sb.block_size as u64 / 512;
     let start_sector = gdt_block * sectors_per_block;
-    let sector_count = sectors_per_block;
-    let gdt_data = read_sectors(dev, start_sector, sector_count)?;
+    let mut gdt_data = read_sectors(dev, start_sector, sectors_per_block)?;
+
+    // Update the raw descriptor in the block data.
+    let desc_size = sb.desc_size as usize;
+    let offset = group * desc_size;
+    if offset + 16 <= gdt_data.len() {
+        let desc = gdt.get(group)?;
+        // Update free_blocks_count_lo (offset 12) and hi (offset 44 if desc_size >= 64).
+        gdt_data[offset + 12..offset + 14].copy_from_slice(&(desc.free_blocks_count as u16).to_le_bytes());
+        if desc_size >= 64 {
+            gdt_data[offset + 44..offset + 46].copy_from_slice(&((desc.free_blocks_count >> 16) as u16).to_le_bytes());
+        }
+    }
+
     txn.pin_block(gdt_block, gdt_data).ok();
     Ok(())
 }

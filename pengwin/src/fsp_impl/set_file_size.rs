@@ -50,6 +50,23 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
             }
         }
 
+        // Persist superblock free-block/inode counts (truncate frees blocks).
+        {
+            let gdt = self.gdt.lock();
+            let free_blocks: u64 = (0..gdt.group_count())
+                .filter_map(|i| gdt.get(i).ok())
+                .map(|g| g.free_blocks_count as u64)
+                .sum();
+            let free_inodes: u32 = (0..gdt.group_count())
+                .filter_map(|i| gdt.get(i).ok())
+                .map(|g| g.free_inodes_count)
+                .sum();
+            drop(gdt);
+            ext4_core::superblock_write::update_superblock(&self.dev, &self.sb, &mut txn,
+                free_blocks, free_inodes, now())
+                .map_err(|_| STATUS_INTERNAL_ERROR)?;
+        }
+
         journal.commit(&self.dev, txn).map_err(|_| STATUS_INTERNAL_ERROR)?;
         drop(journal);
 

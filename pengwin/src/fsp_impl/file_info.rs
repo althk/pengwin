@@ -3,7 +3,8 @@ use ext4_core::inode::Inode;
 use winfsp::filesystem::FileInfo;
 use winfsp::Result;
 use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
+    FILE_ATTRIBUTE_REPARSE_POINT,
 };
 
 use crate::fs_context::{Ext4Fs, FileHandle};
@@ -12,9 +13,15 @@ use crate::fs_context::{Ext4Fs, FileHandle};
 const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
 
 pub fn file_info_from_inode(inode: &Inode, inode_num: u32) -> FileInfo {
-    let mut attrs = FILE_ATTRIBUTE_READONLY.0;
+    // Map ext4 mode bits to NTFS-style attributes. Owner-write missing => READONLY.
+    let mut attrs = if inode.mode & 0o200 == 0 {
+        FILE_ATTRIBUTE_READONLY.0
+    } else {
+        FILE_ATTRIBUTE_NORMAL.0
+    };
     if inode.is_dir() {
-        attrs |= FILE_ATTRIBUTE_DIRECTORY.0;
+        // Directory bit is non-exclusive with NORMAL; clear NORMAL when adding dir bit.
+        attrs = (attrs & !FILE_ATTRIBUTE_NORMAL.0) | FILE_ATTRIBUTE_DIRECTORY.0;
     }
     let reparse_tag = if inode.is_symlink() {
         attrs |= FILE_ATTRIBUTE_REPARSE_POINT.0;
@@ -30,7 +37,10 @@ pub fn file_info_from_inode(inode: &Inode, inode_num: u32) -> FileInfo {
     FileInfo {
         file_attributes: attrs,
         reparse_tag,
-        allocation_size: (inode.size + 511) & !511,
+        // Round to the volume cluster size (sectors_per_allocation_unit * sector_size = 8 * 512 = 4096).
+        // Reporting a 512-aligned value smaller than the cluster makes the kernel cache manager
+        // refuse to flush full pages, hanging WriteFile/Close on newly created files.
+        allocation_size: (inode.size + 4095) & !4095,
         file_size: inode.size,
         creation_time: to_filetime(inode.ctime),
         last_access_time: to_filetime(inode.atime),
@@ -49,12 +59,15 @@ impl<D: BlockDevice + 'static> Ext4Fs<D> {
         context: &FileHandle,
         out: &mut FileInfo,
     ) -> Result<()> {
-        let (inode, inode_num) = match context {
-            FileHandle::File { inode, inode_num }
-            | FileHandle::Directory { inode, inode_num, .. }
-            | FileHandle::Symlink { inode, inode_num, .. } => (inode, *inode_num),
+        let inode_num = match context {
+            FileHandle::File { inode_num, .. }
+            | FileHandle::Directory { inode_num, .. }
+            | FileHandle::Symlink { inode_num, .. } => *inode_num,
         };
-        *out = file_info_from_inode(inode, inode_num);
+        // Re-read from disk: the inode in FileHandle is stale after writes.
+        let inode = self.inode(inode_num)
+            .map_err(|_| windows::Win32::Foundation::STATUS_INTERNAL_ERROR)?;
+        *out = file_info_from_inode(&inode, inode_num);
         Ok(())
     }
 

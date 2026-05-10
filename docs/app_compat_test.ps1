@@ -86,6 +86,21 @@ if (-not (Test-Path $fixtureImg)) {
 Write-Host "Copying fixture image to temp file..."
 Copy-Item $fixtureImg $tempImg
 
+# Expand the temp image to 512 MB so write tests have room to work.
+# resize2fs requires e2fsck -f first, then truncate to grow the file, then resize2fs.
+# Use C:\Temp as a staging dir to avoid spaces-in-path issues with wsl.
+Write-Host "Expanding image to 512 MB for write tests..."
+New-Item -ItemType Directory -Path "C:\Temp" -Force | Out-Null
+$stageImg = "C:\Temp\pengwin_resize_$PID.img"
+Copy-Item $tempImg $stageImg
+$ea = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+wsl e2fsck -f -y /mnt/c/Temp/pengwin_resize_$PID.img 2>&1 | Out-Null
+wsl truncate -s 512M /mnt/c/Temp/pengwin_resize_$PID.img 2>&1 | Out-Null
+wsl resize2fs /mnt/c/Temp/pengwin_resize_$PID.img 2>&1 | Out-Null
+$ErrorActionPreference = $ea
+Copy-Item $stageImg $tempImg
+Remove-Item $stageImg -ErrorAction SilentlyContinue
+
 Write-Host "Mounting $tempImg at $mountPoint ..."
 $mountJob = Start-Process -FilePath $pengwinExe `
     -ArgumentList "mount", "`"$tempImg`"", "`"$mountPoint`"" `
@@ -102,11 +117,7 @@ if ($mountJob.HasExited) {
 
 Write-Host "Volume online at $mountPoint`n"
 
-# ---------------------------------------------------------------------------
-# Seed: create a small file on the volume to use as a copy source.
-# (pengwin is currently write-mode; the driver exposes the fixture read-write.)
-# ---------------------------------------------------------------------------
-$seedFile = Join-Path $mountPoint "seed.txt"
+$seedFile = Join-Path $mountPoint "hello.txt"   # pre-seeded by make_fixtures.sh
 $ntfsTemp = [System.IO.Path]::GetTempPath()
 
 # ---------------------------------------------------------------------------

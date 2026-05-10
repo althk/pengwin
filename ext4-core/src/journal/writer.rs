@@ -103,7 +103,11 @@ impl JournalWriter {
             }
         }
         self.write_commit_block(dev, txn.sequence)?;
-        dev.flush()?;
+        // Immediately checkpoint: write blocks to their actual filesystem locations
+        // so that reads see the changes without needing journal replay.
+        for (fs_block, data) in &txn.blocks {
+            write_fs_block(dev, *fs_block, data, self.block_size)?;
+        }
         self.next_sequence += 1;
         Ok(())
     }

@@ -31,8 +31,13 @@ impl<T: FileSystemContext + 'static> Ext4Host<T> {
             .sector_size(512)
             .sectors_per_allocation_unit(8) // 4 KiB clusters
             .file_info_timeout(1000)
+            .volume_info_timeout(1000)
+            .case_sensitive_search(true)
             .case_preserved_names(true)
-            .unicode_on_disk(true);
+            .unicode_on_disk(true)
+            .read_only_volume(false)
+            .post_cleanup_when_modified_only(true)
+            .flush_and_purge_on_cleanup(false);
 
         let host =
             FileSystemHost::new(params, fs).map_err(|e| FspError::HostCreation(e.to_string()))?;

@@ -69,11 +69,16 @@ fn parse_header(data: &[u8], location: u64) -> Result<ExtentHeader, ExtentWriteE
     Ok(hdr)
 }
 
+/// Returns (inode_table_block_for_this_inode, byte_offset_within_that_block).
 fn inode_location(sb: &Superblock, gdt: &GroupDescTable, inode_num: u32) -> Result<(u64, usize), ExtentWriteError> {
     let group = ((inode_num - 1) / sb.inodes_per_group) as usize;
     let idx_in_group = ((inode_num - 1) % sb.inodes_per_group) as usize;
     let desc = gdt.get(group)?;
-    Ok((desc.inode_table, idx_in_group * sb.inode_size as usize))
+    let inode_size = sb.inode_size as usize;
+    let inodes_per_block = sb.block_size as usize / inode_size;
+    let block_index = idx_in_group / inodes_per_block;
+    let offset_in_block = (idx_in_group % inodes_per_block) * inode_size;
+    Ok((desc.inode_table + block_index as u64, offset_in_block))
 }
 
 fn read_raw_inode_at(dev: &dyn BlockDevice, sb: &Superblock, table_block: u64, off: usize) -> Result<RawInode, ExtentWriteError> {
@@ -602,8 +607,8 @@ mod tests {
         };
         // free_blocks_count reflects that 3 blocks are pre-used in each group.
         let gdt = GroupDescTable::from_groups(vec![
-            GroupDesc { block_bitmap: 0, inode_bitmap: 1, inode_table: 2, free_blocks_count: bpg - 3, free_inodes_count: ipg },
-            GroupDesc { block_bitmap: 128, inode_bitmap: 129, inode_table: 130, free_blocks_count: bpg - 3, free_inodes_count: ipg },
+            GroupDesc { block_bitmap: 0, inode_bitmap: 1, inode_table: 2, free_blocks_count: bpg - 3, free_inodes_count: ipg, itable_unused: 0 },
+            GroupDesc { block_bitmap: 128, inode_bitmap: 129, inode_table: 130, free_blocks_count: bpg - 3, free_inodes_count: ipg, itable_unused: 0 },
         ]);
         (dev, sb, gdt)
     }

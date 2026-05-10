@@ -311,7 +311,7 @@ mod tests {
         device_data[start..start + BLOCK_SIZE].copy_from_slice(&block);
 
         let dev = MemDevice(device_data);
-        let groups = vec![GroupDesc { block_bitmap: 0, inode_bitmap: 0, inode_table: 0, free_blocks_count: 0, free_inodes_count: 0 }];
+        let groups = vec![GroupDesc { block_bitmap: 0, inode_bitmap: 0, inode_table: 0, free_blocks_count: 0, free_inodes_count: 0, itable_unused: 0 }];
         let gdt = GroupDescTable::from_groups(groups);
 
         let block_data = make_extent_root(phys_block);
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn not_a_directory() {
         let sb = make_sb();
-        let groups = vec![GroupDesc { block_bitmap: 0, inode_bitmap: 0, inode_table: 0, free_blocks_count: 0, free_inodes_count: 0 }];
+        let groups = vec![GroupDesc { block_bitmap: 0, inode_bitmap: 0, inode_table: 0, free_blocks_count: 0, free_inodes_count: 0, itable_unused: 0 }];
         let gdt = GroupDescTable::from_groups(groups);
         let inode = make_file_inode([0u8; 60], 0);
         let dev = MemDevice(vec![0u8; 512]);

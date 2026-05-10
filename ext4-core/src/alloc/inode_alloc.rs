@@ -38,7 +38,9 @@ pub fn alloc_inode(
 
         let bitmap_block = gdt.get(group)?.inode_bitmap;
         flush_inode_bitmap(dev, sb, txn, bitmap_block, bm.as_bytes())?;
-        gdt.adjust_free_inodes(group, -1)?;
+        update_gdt_free_inodes(dev, sb, gdt, txn, group, -1)?;
+        gdt.update_itable_unused(group, slot, sb)?;
+        update_gdt_itable_unused(dev, sb, gdt, txn, group)?;
 
         return Ok(group as u32 * sb.inodes_per_group + slot + 1);
     }
@@ -105,7 +107,8 @@ pub fn free_inode(
     raw.i_dtime = U32::new(now);
     flush_inode_table(dev, sb, txn, inode_table_block, &table_block)?;
 
-    gdt.adjust_free_inodes(group, 1)?;
+    update_gdt_itable_unused(dev, sb, gdt, txn, group)?;
+    update_gdt_free_inodes(dev, sb, gdt, txn, group, 1)?;
     Ok(())
 }
 
@@ -170,5 +173,60 @@ fn flush_inode_table(
     padded.resize(sb.block_size as usize, 0);
     write_sectors(dev, start_sector, &padded)?;
     txn.pin_block(inode_table_block, padded).ok();
+    Ok(())
+}
+
+fn update_gdt_free_inodes(
+    dev: &dyn BlockDevice,
+    sb: &Superblock,
+    gdt: &mut GroupDescTable,
+    txn: &mut Transaction,
+    group: usize,
+    delta: i64,
+) -> Result<(), AllocError> {
+    gdt.adjust_free_inodes(group, delta)?;
+    sync_gdt_block(dev, sb, gdt, txn, group)
+}
+
+fn update_gdt_itable_unused(
+    dev: &dyn BlockDevice,
+    sb: &Superblock,
+    gdt: &mut GroupDescTable,
+    txn: &mut Transaction,
+    group: usize,
+) -> Result<(), AllocError> {
+    sync_gdt_block(dev, sb, gdt, txn, group)
+}
+
+fn sync_gdt_block(
+    dev: &dyn BlockDevice,
+    sb: &Superblock,
+    gdt: &GroupDescTable,
+    txn: &mut Transaction,
+    group: usize,
+) -> Result<(), AllocError> {
+    let gdt_block = sb.first_data_block as u64 + 1;
+    let sectors_per_block = sb.block_size as u64 / 512;
+    let start_sector = gdt_block * sectors_per_block;
+    let mut gdt_data = read_sectors(dev, start_sector, sectors_per_block)?;
+
+    let desc_size = sb.desc_size as usize;
+    let offset = group * desc_size;
+    if offset + 32 <= gdt_data.len() {
+        let desc = gdt.get(group)?;
+        // free_inodes_count_lo @ offset 14
+        gdt_data[offset + 14..offset + 16].copy_from_slice(&(desc.free_inodes_count as u16).to_le_bytes());
+        // itable_unused_lo @ offset 28
+        gdt_data[offset + 28..offset + 30].copy_from_slice(&(desc.itable_unused as u16).to_le_bytes());
+
+        if desc_size >= 64 {
+            // free_inodes_count_hi @ offset 46
+            gdt_data[offset + 46..offset + 48].copy_from_slice(&((desc.free_inodes_count >> 16) as u16).to_le_bytes());
+            // itable_unused_hi @ offset 50
+            gdt_data[offset + 50..offset + 52].copy_from_slice(&((desc.itable_unused >> 16) as u16).to_le_bytes());
+        }
+    }
+
+    txn.pin_block(gdt_block, gdt_data).ok();
     Ok(())
 }

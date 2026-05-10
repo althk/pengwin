@@ -143,6 +143,7 @@ mod tests {
                 inode_table:       group0_inode_table,
                 free_blocks_count: blocks_per_group,
                 free_inodes_count: inodes_per_group,
+                itable_unused:    0,
             },
             GroupDesc {
                 block_bitmap:      group1_bitmap_block,
@@ -150,6 +151,7 @@ mod tests {
                 inode_table:       group1_inode_table,
                 free_blocks_count: blocks_per_group,
                 free_inodes_count: inodes_per_group,
+                itable_unused:    0,
             },
         ];
         (dev, GroupDescTable::from_groups(groups))

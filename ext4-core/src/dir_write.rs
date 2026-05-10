@@ -628,6 +628,7 @@ mod tests {
             inode_table:       2,
             free_blocks_count: (DEVICE_BLOCKS - 8) as u32,
             free_inodes_count: 60,
+            itable_unused:     0,
         }])
     }
 

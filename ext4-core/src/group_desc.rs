@@ -43,6 +43,7 @@ pub struct GroupDesc {
     pub inode_table:      u64,
     pub free_blocks_count: u32,
     pub free_inodes_count: u32,
+    pub itable_unused:    u32,
 }
 
 fn combine32(lo: u32, hi: u32) -> u64 {
@@ -72,6 +73,8 @@ impl GroupDesc {
                                | (free_blocks_hi << 16),
             free_inodes_count: raw.bg_free_inodes_count_lo.get() as u32
                                | (free_inodes_hi << 16),
+            itable_unused:     raw.bg_itable_unused_lo.get() as u32
+                               | ((raw.bg_itable_unused_hi.get() as u32) << 16),
         }
     }
 }
@@ -187,6 +190,23 @@ impl GroupDescTable {
         desc.free_inodes_count = (desc.free_inodes_count as i64 + delta).max(0) as u32;
         Ok(())
     }
+
+    /// Update `itable_unused` based on the newly allocated inode `slot` (0-based).
+    pub fn update_itable_unused(&mut self, group: usize, slot: u32, sb: &Superblock) -> Result<(), GroupDescError> {
+        let n = self.groups.len();
+        let desc = self.groups.get_mut(group)
+            .ok_or(GroupDescError::OutOfRange(group, n))?;
+        
+        let used_count = slot + 1;
+        if used_count > sb.inodes_per_group {
+            return Ok(());
+        }
+        let unused_at_end = sb.inodes_per_group - used_count;
+        if unused_at_end < desc.itable_unused {
+            desc.itable_unused = unused_at_end;
+        }
+        Ok(())
+    }
 }
 
 fn groups_count(sb: &Superblock) -> Result<u64, GroupDescError> {
@@ -268,6 +288,7 @@ mod tests {
         d.bg_inode_table_lo       = U32::new(inode_table);
         d.bg_free_blocks_count_lo = U16::new(free_blocks);
         d.bg_free_inodes_count_lo = U16::new(free_inodes);
+        d.bg_itable_unused_lo     = U16::new(free_inodes); // Assume some unused for test
         d
     }
 

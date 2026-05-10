@@ -42,6 +42,7 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
 
         let path = file_name.to_string_lossy();
         let path = path.replace('\\', "/");
+        tracing::debug!(target: "pengwin::create", "create_handle ENTRY path={path} create_options=0x{:x}", create_options);
 
         let (parent_path, name) = split_path(&path)
             .ok_or(STATUS_OBJECT_NAME_INVALID)?;
@@ -60,7 +61,6 @@ impl<D: BlockDevice + Send + Sync + 'static> Ext4Fs<D> {
         if self.lookup(&parent_inode, name).map_err(|_| STATUS_INTERNAL_ERROR)?.is_some() {
             return Err(STATUS_OBJECT_NAME_COLLISION.into());
         }
-
         let mut journal = self.journal.lock();
         let mut txn = journal.begin_transaction();
 
