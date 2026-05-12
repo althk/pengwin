@@ -21,6 +21,11 @@ Pengwin consists of two main parts:
 - **Write Support**: Full RW mounts with journal replay, allocator, and cleanup-on-unmount — for when you actually want to change something.
 - **Raw Disk Support**: Direct access to physical partitions (e.g., `\\.\Harddisk0Partition5`).
 
+### Use Cases
+
+- Using WSL for mounting only works when the ext4 partition is on a different physical disk from the Windows 11 partition. If both are on the same partition WSL will fail to mount because it looks to take full control of the physical disk. In such cases, Pengwin comes very handy!
+- For one-offs, you probably don't want a full Linux subsystem on your Windows 11, in those cases installing only WinFSP will get you going with Pengwin.
+
 ---
 
 ## 📦 Installation (Pre-built Binary)
