@@ -30,6 +30,7 @@ impl<T: FileSystemContext + 'static> Ext4Host<T> {
         params
             .sector_size(512)
             .sectors_per_allocation_unit(8) // 4 KiB clusters
+            .max_component_length(255)
             .file_info_timeout(1000)
             .volume_info_timeout(1000)
             .case_sensitive_search(true)
@@ -52,7 +53,10 @@ impl<T: FileSystemContext + 'static> Ext4Host<T> {
         let is_dir_mount = std::path::Path::new(mountpoint).components().count() > 1;
         if is_dir_mount {
             if let Err(e) = enable_symlink_privilege() {
-                tracing::debug!("SeCreateSymbolicLinkPrivilege not acquired ({}); proceeding anyway", e);
+                tracing::debug!(
+                    "SeCreateSymbolicLinkPrivilege not acquired ({}); proceeding anyway",
+                    e
+                );
             }
         }
         self.host
@@ -114,12 +118,13 @@ fn enable_symlink_privilege() -> Result<(), FspError> {
         AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None)
             .map_err(|e| FspError::PrivilegeError(e.to_string()))?;
 
-        if windows::Win32::Foundation::GetLastError() == windows::Win32::Foundation::ERROR_NOT_ALL_ASSIGNED {
+        if windows::Win32::Foundation::GetLastError()
+            == windows::Win32::Foundation::ERROR_NOT_ALL_ASSIGNED
+        {
             return Err(FspError::PrivilegeError(
                 "SeCreateSymbolicLinkPrivilege not held by process; run as Administrator or enable Developer Mode".to_string()
             ));
         }
-
 
         windows::Win32::Foundation::CloseHandle(token)
             .map_err(|e| FspError::PrivilegeError(e.to_string()))?;

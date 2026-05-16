@@ -94,6 +94,38 @@ Press `Ctrl+C` in the terminal where Pengwin is running. It cleanly unmounts the
 
 ---
 
+## 📂 Drive Letter vs Directory Mount Points
+
+Both styles work, but they behave differently under Windows' UAC model:
+
+| Mount style | Example | Visible in Explorer (non-elevated) | Notes |
+| --- | --- | --- | --- |
+| Drive letter | `pengwin mount … L:` | ❌ when pengwin runs elevated | Visible in `cmd`/PowerShell at the same elevation level as pengwin |
+| Directory junction | `pengwin mount … C:\mnt\ext4` | ✅ always | Recommended for raw disk partitions |
+
+**Why?** Raw disk access (`\\.\HarddiskXPartitionY`) requires Administrator, and Windows places drive letters created by an elevated process into the elevated logon session — invisible to non-elevated processes like Explorer. This is a Windows UAC limitation, not a Pengwin bug. Directory mount points use NTFS reparse points instead and have no such isolation.
+
+**Two ways to get a drive letter visible in Explorer:**
+
+1. **Mount an image file** (no elevation required), then drive letters work normally:
+
+   ```powershell
+   ./target/release/pengwin mount C:\images\linux.img L:
+   ```
+
+2. **Enable Windows' `EnableLinkedConnections` policy** so elevated and non-elevated tokens share drive mappings (requires reboot, system-wide):
+
+   ```powershell
+   # Run from an elevated PowerShell
+   New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" `
+     -Name EnableLinkedConnections -Value 1 -PropertyType DWord -Force
+   # Reboot for the change to take effect.
+   ```
+
+If you don't want to touch the registry and need raw-disk access, just use a directory mount point — it's the same filesystem under a different namespace.
+
+---
+
 ## 🐞 Debugging with `--verbose`
 
 When something looks wrong — a file won't open, a directory shows up empty, writes return errors — re-run with `-v` (or `--verbose`):

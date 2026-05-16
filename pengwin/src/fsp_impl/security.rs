@@ -79,10 +79,11 @@ pub(crate) fn inode_to_file_attributes(inode: &ext4_core::inode::Inode) -> u32 {
     };
     let mut attrs = FILE_ATTRIBUTE_NORMAL.0;
     if inode.is_dir() {
-        attrs |= FILE_ATTRIBUTE_DIRECTORY.0;
+        // FILE_ATTRIBUTE_NORMAL is only valid alone; clear it when setting any other attribute.
+        attrs = (attrs & !FILE_ATTRIBUTE_NORMAL.0) | FILE_ATTRIBUTE_DIRECTORY.0;
     }
     if inode.is_symlink() {
-        attrs |= FILE_ATTRIBUTE_REPARSE_POINT.0;
+        attrs = (attrs & !FILE_ATTRIBUTE_NORMAL.0) | FILE_ATTRIBUTE_REPARSE_POINT.0;
     }
     attrs
 }
