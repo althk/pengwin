@@ -37,16 +37,24 @@ pub struct RawJournalSuperblock {
 
 const _: () = assert!(core::mem::size_of::<RawJournalSuperblock>() == 1024);
 
+/// JBD2 incompat feature: revoke records in the journal.
+pub const JBD2_FEATURE_INCOMPAT_REVOKE: u32 = 0x001;
 /// JBD2 incompat feature: 64-bit block numbers in tags.
-pub const JBD2_FEATURE_INCOMPAT_64BIT: u32 = 0x2;
+pub const JBD2_FEATURE_INCOMPAT_64BIT: u32 = 0x002;
 /// JBD2 incompat feature: async commit (write ordering only, safe for read-only replay).
-pub const JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT: u32 = 0x10;
-/// JBD2 incompat feature: checksums on commit blocks (CRC32c).
-pub const JBD2_FEATURE_INCOMPAT_CSUM_V3: u32 = 0x400;
+pub const JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT: u32 = 0x004;
+/// JBD2 incompat feature: checksums v2 on metadata blocks (CRC32c, superseded by v3).
+pub const JBD2_FEATURE_INCOMPAT_CSUM_V2: u32 = 0x008;
+/// JBD2 incompat feature: checksums v3 on commit blocks (CRC32c).
+pub const JBD2_FEATURE_INCOMPAT_CSUM_V3: u32 = 0x010;
 
 /// Supported incompat mask — refuse if any other bits are set.
 const SUPPORTED_INCOMPAT: u32 =
-    JBD2_FEATURE_INCOMPAT_64BIT | JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT | JBD2_FEATURE_INCOMPAT_CSUM_V3;
+    JBD2_FEATURE_INCOMPAT_REVOKE
+    | JBD2_FEATURE_INCOMPAT_64BIT
+    | JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT
+    | JBD2_FEATURE_INCOMPAT_CSUM_V2
+    | JBD2_FEATURE_INCOMPAT_CSUM_V3;
 
 #[derive(Debug, Clone)]
 pub struct JournalSuperblock {
