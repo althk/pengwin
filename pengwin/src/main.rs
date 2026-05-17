@@ -127,9 +127,11 @@ where
     D: ext4_core::block_device::BlockDevice + Send + Sync + 'static,
 {
     let read_only = !rw;
+    let uuid = fs.superblock().uuid;
+    let volume_serial = u32::from_le_bytes([uuid[0], uuid[1], uuid[2], uuid[3]]);
     tracing::info!(source, mountpoint, read_only, "mounting ext4 filesystem");
 
-    let mut host = fsp::Ext4Host::new(fs, read_only)?;
+    let mut host = fsp::Ext4Host::new(fs, read_only, volume_serial)?;
     host.mount(mountpoint)?;
 
     let (tx, rx) = std::sync::mpsc::channel();
